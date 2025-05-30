@@ -37,7 +37,7 @@ compile:
 
 test-compile-was-run:
     FROM alpine:3.20
-    COPY dist /from-git
+    COPY +compile/dist /from-git
     COPY +compile/dist /from-compile
     RUN diff -r /from-git /from-compile >/dev/null || (echo "dist and +compile/dist are different, did you forget to run earthly +compile?" && exit 1)
 
