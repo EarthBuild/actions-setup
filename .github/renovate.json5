@@ -1,5 +1,5 @@
 {
-  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
   extends: [
     'config:recommended',
     'security:openssf-scorecard'
@@ -27,7 +27,7 @@
         'minor',
         'patch',
       ],
-      groupName: "{{datasource}} (non-major)",
+      groupName: '{{datasource}} (non-major)',
       addLabels: [
         'non-major',
       ],
