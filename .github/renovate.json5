@@ -7,8 +7,8 @@
   ],
   configMigration: true,
   dockerfile: {
-    fileMatch: [
-      'Earthfile',
+    managerFilePatterns: [
+      '/Earthfile/',
     ],
   },
   labels: [
