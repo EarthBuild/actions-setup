@@ -1,13 +1,11 @@
 {
-  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
   extends: [
-    "config:recommended"
+    'config:best-practices',
+    'security:openssf-scorecard',
+    ':semanticCommits',
   ],
   configMigration: true,
-  prHourlyLimit: 1,
-  schedule: [ // utc timezone
-    'after 6am on monday',
-  ],
   dockerfile: {
     fileMatch: [
       'Earthfile',
@@ -26,7 +24,7 @@
         'minor',
         'patch',
       ],
-      groupName: "{{datasource}} (non-major)",
+      groupName: '{{datasource}} (non-major)',
       addLabels: [
         'non-major',
       ],
