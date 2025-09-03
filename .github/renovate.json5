@@ -14,32 +14,4 @@
   labels: [
     'renovate',
   ],
-  packageRules: [
-    {
-      // group packages in the same PR according to data source & update type
-      matchManagers: [
-        'npm', 'github-actions',
-      ],
-      matchUpdateTypes: [
-        'minor',
-        'patch',
-      ],
-      groupName: '{{datasource}} (non-major)',
-      addLabels: [
-        'non-major',
-      ],
-    },
-    {
-      // add major label to major updates
-      matchManagers: [
-        'npm', 'github-actions',
-      ],
-      matchUpdateTypes: [
-        'major',
-      ],
-      addLabels: [
-        '{{updateType}}',
-      ],
-    },
-  ],
 }
