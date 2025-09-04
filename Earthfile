@@ -6,7 +6,7 @@ ARG EARTHLY_LIB_VERSION=3.0.1
 IMPORT github.com/earthly/lib/utils/git:$EARTHLY_LIB_VERSION AS git
 
 npm-base:
-    FROM node:21.7-alpine3.19
+    FROM node:21.7-alpine3.19@sha256:1e13649e44d505d5410164f5b7325e4ff1ae551e87e6e4f17d74f6b9b0affbff
     COPY ./package.json ./
     COPY ./package-lock.json ./
     RUN npm install
@@ -36,7 +36,7 @@ compile:
     SAVE ARTIFACT node_modules AS LOCAL node_modules
 
 test-compile-was-run:
-    FROM alpine:3.20
+    FROM alpine:3.20@sha256:b3119ef930faabb6b7b976780c0c7a9c1aa24d0c75e9179ac10e6bc9ac080d0d
     COPY +compile/dist /from-git
     COPY +compile/dist /from-compile
     RUN diff -r /from-git /from-compile >/dev/null || (echo "dist and +compile/dist are different, did you forget to run earthly +compile?" && exit 1)
@@ -64,7 +64,7 @@ test-run:
     RUN grep 'Found tool in cache' output2
 
 lint-newline:
-    FROM alpine:3.20
+    FROM alpine:3.20@sha256:b3119ef930faabb6b7b976780c0c7a9c1aa24d0c75e9179ac10e6bc9ac080d0d
     WORKDIR /everything
     COPY . .
     # test that line endings are unix-style
@@ -99,7 +99,7 @@ lint-newline:
         exit $code
 
 update-dist-for-renovate:
-    FROM alpine/git
+    FROM alpine/git@sha256:af916bb957a0a7106f86b3e4e583b1e1444957518d8e4132d6a37259c912a277
     RUN git config --global user.name "renovate[bot]" && \
         git config --global user.email "renovate[bot]@users.noreply.github.com" && \
         git config --global url."git@github.com:".insteadOf "https://github.com/"
@@ -119,7 +119,7 @@ update-dist-for-renovate:
          git push origin $branch
 
 merge-release-to-major-branch:
-    FROM alpine/git
+    FROM alpine/git@sha256:af916bb957a0a7106f86b3e4e583b1e1444957518d8e4132d6a37259c912a277
     RUN git config --global user.name "littleredcorvette" && \
         git config --global user.email "littleredcorvette@users.noreply.github.com" && \
         git config --global url."git@github.com:".insteadOf "https://github.com/"
