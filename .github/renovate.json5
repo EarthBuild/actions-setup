@@ -1,13 +1,11 @@
 {
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
   extends: [
-    'config:recommended',
+    'config:best-practices',
+    'security:openssf-scorecard',
+    ':semanticCommits',
   ],
   configMigration: true,
-  prHourlyLimit: 1,
-  schedule: [
-    'after 6am on monday',
-  ],
   dockerfile: {
     managerFilePatterns: [
       '/Earthfile/',
@@ -15,33 +13,5 @@
   },
   labels: [
     'renovate',
-  ],
-  packageRules: [
-    {
-      matchManagers: [
-        'npm',
-        'github-actions',
-      ],
-      matchUpdateTypes: [
-        'minor',
-        'patch',
-      ],
-      groupName: '{{datasource}} (non-major)',
-      addLabels: [
-        'non-major',
-      ],
-    },
-    {
-      matchManagers: [
-        'npm',
-        'github-actions',
-      ],
-      matchUpdateTypes: [
-        'major',
-      ],
-      addLabels: [
-        '{{updateType}}',
-      ],
-    },
   ],
 }
