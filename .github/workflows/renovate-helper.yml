@@ -2,7 +2,7 @@ name: Update Renovate Branch
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -11,14 +11,13 @@ concurrency:
 jobs:
   update-renovate-branch:
     if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'renovate/') && github.actor == 'renovate[bot]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     env:
       FORCE_COLOR: 1
       EARTHLY_CONVERSION_PARALLELISM: "5"
-      EARTHLY_TOKEN: "${{ secrets.EARTHLY_TOKEN }}"
       EARTHLY_INSTALL_ID: "earthly-actions-setup-githubactions"
     steps:
-      - uses: earthly/actions/setup-earthly@v1
+      - uses: EarthBuild/actions-setup@main
         with:
           version: v0.8.6
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4

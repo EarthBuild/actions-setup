@@ -98,25 +98,25 @@ lint-newline:
         done; \
         exit $code
 
+# update-dist-for-renovate re-compiles the project and commits the new build to the same branch.
 update-dist-for-renovate:
     FROM alpine/git@sha256:af916bb957a0a7106f86b3e4e583b1e1444957518d8e4132d6a37259c912a277
     RUN git config --global user.name "renovate[bot]" && \
         git config --global user.email "renovate[bot]@users.noreply.github.com" && \
         git config --global url."git@github.com:".insteadOf "https://github.com/"
 
-    ARG git_repo="earthly/actions-setup"
+    ARG git_repo="EarthBuild/actions-setup"
     ARG git_url="git@github.com:$git_repo"
     ARG SECRET_PATH=littleredcorvette-id_rsa
     DO --pass-args git+DEEP_CLONE --GIT_URL=$git_url --SECRET_PATH=$SECRET_PATH
 
-    ARG EARTHLY_GIT_BRANCH
-    LET branch=$EARTHLY_GIT_BRANCH
+    ARG --required EARTHLY_GIT_BRANCH
     RUN --mount=type=secret,id=$SECRET_PATH,mode=0400,target=/root/.ssh/id_rsa \
-         git checkout $branch
+         git checkout $EARTHLY_GIT_BRANCH
     COPY --dir +compile/dist .
     RUN git add dist && git commit -m "update dist for Renovate" || echo nothing to commit
     RUN --push --mount=type=secret,id=$SECRET_PATH,mode=0400,target=/root/.ssh/id_rsa \
-         git push origin $branch
+         git push origin $EARTHLY_GIT_BRANCH
 
 merge-release-to-major-branch:
     FROM alpine/git@sha256:af916bb957a0a7106f86b3e4e583b1e1444957518d8e4132d6a37259c912a277
