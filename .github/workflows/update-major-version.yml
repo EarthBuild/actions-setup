@@ -1,8 +1,8 @@
 name: Update Major Version Branch
 
 on:
-    release:
-      types: [released]
+  release:
+    types: [released]
 
 jobs:
   update-major-version-branch:
@@ -10,7 +10,6 @@ jobs:
     env:
       FORCE_COLOR: 1
       EARTHLY_CONVERSION_PARALLELISM: "5"
-      EARTHLY_TOKEN: "${{ secrets.EARTHLY_TOKEN }}"
       EARTHLY_INSTALL_ID: "earthly-actions-setup-githubactions"
     steps:
       - uses: earthly/actions/setup-earthly@v1
