@@ -32,5 +32,5 @@ jobs:
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git add dist
-          git diff --staged --quiet || git commit -m "update dist for Renovate"
+          git diff --staged --quiet && echo "nothing to commit" || git commit -m "ci: update dist for Renovate"
           git push
