@@ -36,7 +36,7 @@ compile:
     SAVE ARTIFACT node_modules AS LOCAL node_modules
 
 test-compile-was-run:
-    FROM alpine:3.20@sha256:b3119ef930faabb6b7b976780c0c7a9c1aa24d0c75e9179ac10e6bc9ac080d0d
+    FROM alpine:3.22@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
     COPY +compile/dist /from-git
     COPY +compile/dist /from-compile
     RUN diff -r /from-git /from-compile >/dev/null || (echo "dist and +compile/dist are different, did you forget to run earthly +compile?" && exit 1)
@@ -64,7 +64,7 @@ test-run:
     RUN grep 'Found tool in cache' output2
 
 lint-newline:
-    FROM alpine:3.20@sha256:b3119ef930faabb6b7b976780c0c7a9c1aa24d0c75e9179ac10e6bc9ac080d0d
+    FROM alpine:3.22@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
     WORKDIR /everything
     COPY . .
     # test that line endings are unix-style
