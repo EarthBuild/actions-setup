@@ -23,7 +23,7 @@ code:
 
 lint:
     FROM +code
-    COPY .eslintrc.cjs .
+    COPY eslint.config.js .
     RUN npm run-script lint
 
 compile:
