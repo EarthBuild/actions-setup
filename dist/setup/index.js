@@ -47,6 +47,7 @@ const cacheTwirpClient = __importStar(__nccwpck_require__(2502));
 const config_1 = __nccwpck_require__(5147);
 const tar_1 = __nccwpck_require__(6490);
 const constants_1 = __nccwpck_require__(8840);
+const http_client_1 = __nccwpck_require__(6255);
 class ValidationError extends Error {
     constructor(message) {
         super(message);
@@ -83,7 +84,17 @@ function checkKey(key) {
  * @returns boolean return true if Actions cache service feature is available, otherwise false
  */
 function isFeatureAvailable() {
-    return !!process.env['ACTIONS_CACHE_URL'];
+    const cacheServiceVersion = (0, config_1.getCacheServiceVersion)();
+    // Check availability based on cache service version
+    switch (cacheServiceVersion) {
+        case 'v2':
+            // For v2, we need ACTIONS_RESULTS_URL
+            return !!process.env['ACTIONS_RESULTS_URL'];
+        case 'v1':
+        default:
+            // For v1, we only need ACTIONS_CACHE_URL
+            return !!process.env['ACTIONS_CACHE_URL'];
+    }
 }
 exports.isFeatureAvailable = isFeatureAvailable;
 /**
@@ -168,8 +179,16 @@ function restoreCacheV1(paths, primaryKey, restoreKeys, options, enableCrossOsAr
                 throw error;
             }
             else {
-                // Supress all non-validation cache related errors because caching should be optional
-                core.warning(`Failed to restore: ${error.message}`);
+                // warn on cache restore failure and continue build
+                // Log server errors (5xx) as errors, all other errors as warnings
+                if (typedError instanceof http_client_1.HttpClientError &&
+                    typeof typedError.statusCode === 'number' &&
+                    typedError.statusCode >= 500) {
+                    core.error(`Failed to restore: ${error.message}`);
+                }
+                else {
+                    core.warning(`Failed to restore: ${error.message}`);
+                }
             }
         }
         finally {
@@ -222,7 +241,13 @@ function restoreCacheV2(paths, primaryKey, restoreKeys, options, enableCrossOsAr
                 core.debug(`Cache not found for version ${request.version} of keys: ${keys.join(', ')}`);
                 return undefined;
             }
-            core.info(`Cache hit for: ${request.key}`);
+            const isRestoreKeyMatch = request.key !== response.matchedKey;
+            if (isRestoreKeyMatch) {
+                core.info(`Cache hit for restore-key: ${response.matchedKey}`);
+            }
+            else {
+                core.info(`Cache hit for: ${response.matchedKey}`);
+            }
             if (options === null || options === void 0 ? void 0 : options.lookupOnly) {
                 core.info('Lookup only - skipping download');
                 return response.matchedKey;
@@ -247,7 +272,15 @@ function restoreCacheV2(paths, primaryKey, restoreKeys, options, enableCrossOsAr
             }
             else {
                 // Supress all non-validation cache related errors because caching should be optional
-                core.warning(`Failed to restore: ${error.message}`);
+                // Log server errors (5xx) as errors, all other errors as warnings
+                if (typedError instanceof http_client_1.HttpClientError &&
+                    typeof typedError.statusCode === 'number' &&
+                    typedError.statusCode >= 500) {
+                    core.error(`Failed to restore: ${error.message}`);
+                }
+                else {
+                    core.warning(`Failed to restore: ${error.message}`);
+                }
             }
         }
         finally {
@@ -350,7 +383,15 @@ function saveCacheV1(paths, key, options, enableCrossOsArchive = false) {
                 core.info(`Failed to save: ${typedError.message}`);
             }
             else {
-                core.warning(`Failed to save: ${typedError.message}`);
+                // Log server errors (5xx) as errors, all other errors as warnings
+                if (typedError instanceof http_client_1.HttpClientError &&
+                    typeof typedError.statusCode === 'number' &&
+                    typedError.statusCode >= 500) {
+                    core.error(`Failed to save: ${typedError.message}`);
+                }
+                else {
+                    core.warning(`Failed to save: ${typedError.message}`);
+                }
             }
         }
         finally {
@@ -446,7 +487,15 @@ function saveCacheV2(paths, key, options, enableCrossOsArchive = false) {
                 core.info(`Failed to save: ${typedError.message}`);
             }
             else {
-                core.warning(`Failed to save: ${typedError.message}`);
+                // Log server errors (5xx) as errors, all other errors as warnings
+                if (typedError instanceof http_client_1.HttpClientError &&
+                    typeof typedError.statusCode === 'number' &&
+                    typedError.statusCode >= 500) {
+                    core.error(`Failed to save: ${typedError.message}`);
+                }
+                else {
+                    core.warning(`Failed to save: ${typedError.message}`);
+                }
             }
         }
         finally {
@@ -50971,6 +51020,7 @@ const reflection_equals_1 = __nccwpck_require__(9473);
 const binary_writer_1 = __nccwpck_require__(4354);
 const binary_reader_1 = __nccwpck_require__(5210);
 const baseDescriptors = Object.getOwnPropertyDescriptors(Object.getPrototypeOf({}));
+const messageTypeDescriptor = baseDescriptors[message_type_contract_1.MESSAGE_TYPE] = {};
 /**
  * This standard message type provides reflection-based
  * operations to work with a message.
@@ -50981,7 +51031,8 @@ class MessageType {
         this.typeName = name;
         this.fields = fields.map(reflection_info_1.normalizeFieldInfo);
         this.options = options !== null && options !== void 0 ? options : {};
-        this.messagePrototype = Object.create(null, Object.assign(Object.assign({}, baseDescriptors), { [message_type_contract_1.MESSAGE_TYPE]: { value: this } }));
+        messageTypeDescriptor.value = this;
+        this.messagePrototype = Object.create(null, baseDescriptors);
         this.refTypeCheck = new reflection_type_check_1.ReflectionTypeCheck(this);
         this.refJsonReader = new reflection_json_reader_1.ReflectionJsonReader(this);
         this.refJsonWriter = new reflection_json_writer_1.ReflectionJsonWriter(this);
@@ -94513,7 +94564,7 @@ module.exports = parseParams
 /***/ 9167:
 /***/ ((module) => {
 
-module.exports = JSON.parse('{"name":"@actions/cache","version":"4.0.3","preview":true,"description":"Actions cache lib","keywords":["github","actions","cache"],"homepage":"https://github.com/actions/toolkit/tree/main/packages/cache","license":"MIT","main":"lib/cache.js","types":"lib/cache.d.ts","directories":{"lib":"lib","test":"__tests__"},"files":["lib","!.DS_Store"],"publishConfig":{"access":"public"},"repository":{"type":"git","url":"git+https://github.com/actions/toolkit.git","directory":"packages/cache"},"scripts":{"audit-moderate":"npm install && npm audit --json --audit-level=moderate > audit.json","test":"echo \\"Error: run tests from root\\" && exit 1","tsc":"tsc"},"bugs":{"url":"https://github.com/actions/toolkit/issues"},"dependencies":{"@actions/core":"^1.11.1","@actions/exec":"^1.0.1","@actions/glob":"^0.1.0","@actions/http-client":"^2.1.1","@actions/io":"^1.0.1","@azure/abort-controller":"^1.1.0","@azure/ms-rest-js":"^2.6.0","@azure/storage-blob":"^12.13.0","@protobuf-ts/plugin":"^2.9.4","semver":"^6.3.1"},"devDependencies":{"@types/node":"^22.13.9","@types/semver":"^6.0.0","typescript":"^5.2.2"}}');
+module.exports = JSON.parse('{"name":"@actions/cache","version":"4.0.5","preview":true,"description":"Actions cache lib","keywords":["github","actions","cache"],"homepage":"https://github.com/actions/toolkit/tree/main/packages/cache","license":"MIT","main":"lib/cache.js","types":"lib/cache.d.ts","directories":{"lib":"lib","test":"__tests__"},"files":["lib","!.DS_Store"],"publishConfig":{"access":"public"},"repository":{"type":"git","url":"git+https://github.com/actions/toolkit.git","directory":"packages/cache"},"scripts":{"audit-moderate":"npm install && npm audit --json --audit-level=moderate > audit.json","test":"echo \\"Error: run tests from root\\" && exit 1","tsc":"tsc"},"bugs":{"url":"https://github.com/actions/toolkit/issues"},"dependencies":{"@actions/core":"^1.11.1","@actions/exec":"^1.0.1","@actions/glob":"^0.1.0","@protobuf-ts/runtime-rpc":"^2.11.1","@actions/http-client":"^2.1.1","@actions/io":"^1.0.1","@azure/abort-controller":"^1.1.0","@azure/ms-rest-js":"^2.6.0","@azure/storage-blob":"^12.13.0","semver":"^6.3.1"},"devDependencies":{"@types/node":"^22.13.9","@types/semver":"^6.0.0","@protobuf-ts/plugin":"^2.9.4","typescript":"^5.2.2"}}');
 
 /***/ }),
 
