@@ -1,38 +1,38 @@
-import * as os from "os";
-import * as fs from "fs";
-import * as path from "path";
-import * as semver from "semver";
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as semver from 'semver';
 
-import * as io from "@actions/io";
-import * as core from "@actions/core";
-import * as tc from "@actions/tool-cache";
+import * as core from '@actions/core';
+import * as io from '@actions/io';
+import * as tc from '@actions/tool-cache';
 
-import { getVersionObject } from "./lib/get-version";
-import { restoreCache } from "./cache-restore";
+import { restoreCache } from './cache-restore';
+import { getVersionObject } from './lib/get-version';
 
-const IS_WINDOWS = process.platform === "win32";
+const IS_WINDOWS = process.platform === 'win32';
 
 async function run() {
   try {
     const nodeArchToReleaseArch = {
-      x64: "amd64",
-      arm: "arm64",
+      x64: 'amd64',
+      arm: 'arm64',
     };
     const nodePlatformToReleasePlatform = {
-      darwin: "darwin",
-      freebsd: "freebsd",
-      linux: "linux",
-      openbsd: "openbsd",
-      win32: "windows",
+      darwin: 'darwin',
+      freebsd: 'freebsd',
+      linux: 'linux',
+      openbsd: 'openbsd',
+      win32: 'windows',
     };
     const runnerPlatform = os.platform();
-    const pkgName = "earthly";
+    const pkgName = 'earthly';
 
     if (!(runnerPlatform in nodePlatformToReleasePlatform)) {
       throw new Error(
         `Unsupported operating system - ${pkgName} is only released for ${Object.keys(
-          nodePlatformToReleasePlatform
-        ).join(", ")}`
+          nodePlatformToReleasePlatform,
+        ).join(', ')}`,
       );
     }
 
@@ -40,12 +40,12 @@ async function run() {
     const osArch = os.arch();
     const releaseArch = nodeArchToReleaseArch[os.arch()] || osArch;
 
-    const range = core.getInput("version");
+    const range = core.getInput('version');
     const isValidSemVer = semver.valid(range) != null;
-    var tag_name: string;
+    let tag_name: string;
     if (isValidSemVer) {
       core.info(`Using provided strict version ${range}`);
-      if (range[0] === "v") {
+      if (range[0] === 'v') {
         tag_name = range;
       } else {
         tag_name = `v${range}`;
@@ -53,7 +53,7 @@ async function run() {
     } else {
       // only grab the version from the api if the version provided by the user
       // doesn't appear to be a valid semver
-      const prerelease = core.getInput("prerelease").toUpperCase() === 'TRUE';
+      const prerelease = core.getInput('prerelease').toUpperCase() === 'TRUE';
       core.info(`Configured range: ${range}; allow prerelease: ${prerelease}`);
       const version = await getVersionObject(range, prerelease);
       tag_name = version.tag_name;
@@ -62,10 +62,10 @@ async function run() {
     const destination = path.join(os.homedir(), `.${pkgName}`);
     core.info(`Install destination is ${destination}`);
 
-    const installationDir = path.join(destination, "bin");
+    const installationDir = path.join(destination, 'bin');
     const installationPath = path.join(
       installationDir,
-      `${pkgName}${IS_WINDOWS ? ".exe" : ""}`
+      `${pkgName}${IS_WINDOWS ? '.exe' : ''}`,
     );
     core.info(`Matched version: ${tag_name}`);
 
@@ -73,7 +73,7 @@ async function run() {
     const toolcacheDir = tc.find(
       pkgName,
       semver.clean(tag_name) || tag_name.substring(1),
-      os.arch()
+      os.arch(),
     );
 
     if (toolcacheDir) {
@@ -86,7 +86,7 @@ async function run() {
     core.addPath(installationDir);
     const restored = await restoreCache(
       installationPath,
-      semver.clean(tag_name) || tag_name.substring(1)
+      semver.clean(tag_name) || tag_name.substring(1),
     );
     if (restored) {
       await fs.promises.chmod(installationPath, 0o755);
@@ -103,7 +103,7 @@ async function run() {
 
     const buildURL = `https://github.com/earthly/earthly/releases/download/${
       tag_name
-    }/${pkgName}-${releasePlatform}-${releaseArch}${IS_WINDOWS ? ".exe" : ""}`;
+    }/${pkgName}-${releasePlatform}-${releaseArch}${IS_WINDOWS ? '.exe' : ''}`;
 
     core.info(`downloading ${buildURL}`);
     const downloaded = await tc.downloadTool(buildURL, installationPath);
@@ -112,12 +112,12 @@ async function run() {
     await fs.promises.chmod(installationPath, 0o755);
 
     await tc.cacheDir(
-      path.join(destination, "bin"),
+      path.join(destination, 'bin'),
       pkgName,
       semver.clean(tag_name) || tag_name.substring(1),
-      os.arch()
+      os.arch(),
     );
-    core.exportVariable("FORCE_COLOR", "1");
+    core.exportVariable('FORCE_COLOR', '1');
   } catch (error: unknown) {
     if (error instanceof Error) {
       core.setFailed(error.message);

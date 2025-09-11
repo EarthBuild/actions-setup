@@ -25,7 +25,7 @@ jobs:
       - uses: earthly/actions-setup@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          version: "latest" # or pin to an specific version, e.g. "0.8.1"
+          version: 'latest' # or pin to an specific version, e.g. "0.8.1"
       - uses: actions/checkout@v2
       - name: Docker login # to avoid dockerhub rate-limiting
         run: docker login --username "${{ secrets.DOCKERHUB_USERNAME }}" --password "${{ secrets.DOCKERHUB_PASSWORD }}"

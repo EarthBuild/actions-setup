@@ -1,22 +1,22 @@
 name: Setup earthly
 description: Installs the Earthly binary
 branding:
-  icon: "sunrise"
-  color: "green"
+  icon: 'sunrise'
+  color: 'green'
 author: Earthly technologies
 inputs:
   version:
-    description: "version of earthly to use."
-    default: "latest"
+    description: 'version of earthly to use.'
+    default: 'latest'
   prerelease:
-    description: "allow prerelease versions"
-    default: "false"
+    description: 'allow prerelease versions'
+    default: 'false'
   use-cache:
-    description: "whether to use the cache to store earthly or not"
-    default: "true"
+    description: 'whether to use the cache to store earthly or not'
+    default: 'true'
   github-token:
-    description: "GitHub token for fetching Earthly version list."
+    description: 'GitHub token for fetching Earthly version list.'
 runs:
   using: node20
   main: dist/setup/index.js
-  post: "dist/cache-save/index.js"
+  post: 'dist/cache-save/index.js'

@@ -4,14 +4,11 @@
     'config:best-practices',
     'security:openssf-scorecard',
     ':semanticCommits',
+    ':pinVersions',
   ],
   configMigration: true,
   dockerfile: {
-    managerFilePatterns: [
-      '/Earthfile/',
-    ],
+    managerFilePatterns: ['/Earthfile/'],
   },
-  labels: [
-    'renovate',
-  ],
+  labels: ['renovate'],
 }
