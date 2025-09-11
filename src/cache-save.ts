@@ -1,16 +1,16 @@
-import fs from "fs";
+import fs from 'fs';
 
-import * as core from "@actions/core";
-import * as cache from "@actions/cache";
+import * as core from '@actions/core';
+import * as cache from '@actions/cache';
 
-import { State } from "./constants";
-import * as utils from "./cache-utils";
+import { State } from './constants';
+import * as utils from './cache-utils';
 
 // Catch and log any unhandled exceptions.  These exceptions can leak out of the uploadChunk method in
 // @actions/toolkit when a failed upload closes the file descriptor causing any in-process reads to
 // throw an uncaught exception.  Instead of failing this action, just warn.
-process.on("uncaughtException", (e) => {
-  const warningPrefix = "[warning]";
+process.on('uncaughtException', (e) => {
+  const warningPrefix = '[warning]';
   core.info(`${warningPrefix}${e.message}`);
 });
 
@@ -31,7 +31,7 @@ export const cacheBinary = async () => {
     return;
   }
 
-  if (core.getInput('use-cache') !== "true") {
+  if (core.getInput('use-cache') !== 'true') {
     core.info(`skipping cache save as use-cache is not true`);
     return;
   }
@@ -41,11 +41,11 @@ export const cacheBinary = async () => {
   const path = core.getState(State.BinaryPath);
 
   core.debug(
-    `checking if cache hit occurred. primaryKey: ${primaryKey}, state: ${state}`
+    `checking if cache hit occurred. primaryKey: ${primaryKey}, state: ${state}`,
   );
   if (primaryKey === state) {
     core.info(
-      `Cache hit occurred on the primary key ${primaryKey}, not saving cache.`
+      `Cache hit occurred on the primary key ${primaryKey}, not saving cache.`,
     );
     return;
   }

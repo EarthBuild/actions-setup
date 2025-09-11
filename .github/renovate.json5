@@ -7,11 +7,7 @@
   ],
   configMigration: true,
   dockerfile: {
-    managerFilePatterns: [
-      '/Earthfile/',
-    ],
+    managerFilePatterns: ['/Earthfile/'],
   },
-  labels: [
-    'renovate',
-  ],
+  labels: ['renovate'],
 }
