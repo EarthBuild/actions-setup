@@ -99,7 +99,7 @@ lint-newline:
         exit $code
 
 merge-release-to-major-branch:
-    FROM alpine/git@sha256:9c9c6debba3eac25c9230db4bbd1e17d0c27efffdb93e502a47f6f447ab90ac4
+    FROM alpine/git@sha256:7e6d53df14a830e62a3bcefb1daf37f9ea1b9405756c975ad2de66234d362fef
     RUN git config --global user.name "littleredcorvette" && \
         git config --global user.email "littleredcorvette@users.noreply.github.com" && \
         git config --global url."git@github.com:".insteadOf "https://github.com/"
