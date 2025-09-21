@@ -6,7 +6,7 @@ ARG EARTHLY_LIB_VERSION=3.0.1
 IMPORT github.com/EarthBuild/lib/utils/git:$EARTHLY_LIB_VERSION AS git
 
 npm-base:
-    FROM node:22.12-alpine3.19@sha256:40dc4b415c17b85bea9be05314b4a753f45a4e1716bb31c01182e6c53d51a654
+    FROM node:22.12.0-alpine3.19@sha256:40dc4b415c17b85bea9be05314b4a753f45a4e1716bb31c01182e6c53d51a654
     WORKDIR /code
     COPY package.json .
     RUN npm install
