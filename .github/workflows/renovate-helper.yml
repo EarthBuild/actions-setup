@@ -8,6 +8,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
   update-renovate-branch:
     if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'renovate/') && github.actor == 'renovate[bot]'
