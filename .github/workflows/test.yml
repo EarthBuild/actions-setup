@@ -19,6 +19,8 @@ env:
 jobs:
   unit:
     name: earthly +all
+    permissions:
+      contents: read
     env:
       FORCE_COLOR: 1
       EARTHLY_CONVERSION_PARALLELISM: "5"
@@ -40,6 +42,8 @@ jobs:
   # Below are tests specific to the github actions, which ensure the actions-setup code works with GHA
   latest:
     name: Test Latest Version Install
+    permissions:
+      contents: read
     strategy:
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-latest]
@@ -58,6 +62,8 @@ jobs:
       - run: earthly --version
   specific:
     name: Test Specific Version Install
+    permissions:
+      contents: read
     strategy:
       matrix:
         # windows was not available < v0.5.15
@@ -79,6 +85,8 @@ jobs:
       - run: earthly --version
   patch-range:
     name: Test Patch Range Version Install
+    permissions:
+      contents: read
     strategy:
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-latest]
@@ -99,6 +107,8 @@ jobs:
       - run: earthly --version
   major-range:
     name: Test Patch Range Version Install
+    permissions:
+      contents: read
     strategy:
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-latest]
