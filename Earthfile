@@ -7,33 +7,40 @@ IMPORT github.com/EarthBuild/lib/utils/git:$EARTHLY_LIB_VERSION AS git
 
 npm-base:
     FROM node:22.12-alpine3.19@sha256:40dc4b415c17b85bea9be05314b4a753f45a4e1716bb31c01182e6c53d51a654
-    COPY ./package.json ./
-    COPY ./package-lock.json ./
+    WORKDIR /code
+    COPY package.json .
     RUN npm install
     # Output these back in case npm install changes them.
     SAVE ARTIFACT package.json AS LOCAL ./package.json
-    SAVE ARTIFACT package-lock.json AS LOCAL ./package-lock.json
 
 code:
     FROM +npm-base
-    WORKDIR /code
-    COPY package.json package-lock.json .
-    RUN npm ci
     COPY --dir src .
 
 lint:
     FROM +code
-    COPY eslint.config.js .
+    COPY --dir .github .
+    COPY \
+      .editorconfig \
+      .gitignore \
+      .prettierignore \
+      action.yml \
+      Earthfile \
+      eslint.config.js \
+      package.json \
+      README.md \
+      tsconfig.json \
+      vite.config.ts \
+      vitest.config.ts \
+      .
     RUN npm run-script lint
 
 compile:
     FROM +code
     WORKDIR /code
-    RUN npm ci
     COPY tsconfig.json .
     RUN npm run-script package
     SAVE ARTIFACT dist AS LOCAL dist
-    SAVE ARTIFACT node_modules AS LOCAL node_modules
 
 test-compile-was-run:
     FROM alpine:3.22@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
@@ -57,46 +64,11 @@ test-run:
     RUN test "$(cat earthly-path)" = "/root/.earthly/bin"
     # [a-zA-Z0-9]* attempt to match a commit hash
     RUN export PATH="$(cat earthly-path):$PATH" && earthly --version | tee version.output
-    RUN grep '^earthly version v.*linux/amd64; Alpine Linux' version.output
+    RUN grep -E '^earthly version v.*linux/(arm|amd)64; Alpine Linux' version.output
 
     # validate cache was used
     RUN node dist/setup/index.js | tee output2
     RUN grep 'Found tool in cache' output2
-
-lint-newline:
-    FROM alpine:3.22@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
-    WORKDIR /everything
-    COPY . .
-    # test that line endings are unix-style
-    RUN set -e; \
-        code=0; \
-        for f in $(find . -type f \( -iname '*.ts' -o -iname 'Earthfile' \) | grep -v node_modules); do \
-            if ! dos2unix < "$f" | cmp - "$f"; then \
-                echo "$f contains windows-style newlines and must be converted to unix-style (use dos2unix to fix)"; \
-                code=1; \
-            fi; \
-        done; \
-        exit $code
-    # test file ends with a single newline
-    RUN set -e; \
-        code=0; \
-        for f in $(find . -type f \( -iname '*.ts' -o -iname 'Earthfile' \) | grep -v node_modules); do \
-            if [ "$(tail -c 1 $f)" != "$(printf '\n')" ]; then \
-                echo "$f does not end with a newline"; \
-                code=1; \
-            fi; \
-        done; \
-        exit $code
-    # check for files with trailing newlines
-    RUN set -e; \
-        code=0; \
-        for f in $(find . -type f \( -iname '*.ts' -o -iname 'Earthfile' \) | grep -v node_modules); do \
-            if [ "$(tail -c 2 $f)" == "$(printf '\n\n')" ]; then \
-                echo "$f has trailing newlines"; \
-                code=1; \
-            fi; \
-        done; \
-        exit $code
 
 merge-release-to-major-branch:
     FROM alpine/git@sha256:7e6d53df14a830e62a3bcefb1daf37f9ea1b9405756c975ad2de66234d362fef
@@ -121,7 +93,6 @@ merge-release-to-major-branch:
 
 all:
     BUILD +lint
-    BUILD +lint-newline
     BUILD +compile
     BUILD +test
     BUILD +test-run
