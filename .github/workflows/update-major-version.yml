@@ -4,8 +4,12 @@ on:
   release:
     types: [released]
 
+permissions: {}
+
 jobs:
   update-major-version-branch:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     env:
       FORCE_COLOR: 1
