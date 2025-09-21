@@ -1,13 +1,13 @@
-import * as cache from "@actions/cache";
-import * as core from "@actions/core";
+import * as cache from '@actions/cache';
+import * as core from '@actions/core';
 
-import { State } from "./constants";
+import { State } from './constants';
 
-import * as utils from "./cache-utils";
+import * as utils from './cache-utils';
 
 export const restoreCache = async (
   path: string,
-  version: string
+  version: string,
 ): Promise<boolean> => {
   if (!utils.isCacheFeatureAvailable()) {
     return false;
@@ -23,10 +23,10 @@ export const restoreCache = async (
   core.saveState(State.BinaryPath, path);
 
   const cacheKey = await cache.restoreCache([path], primaryKey);
-  core.setOutput("cache-hit", Boolean(cacheKey));
+  core.setOutput('cache-hit', Boolean(cacheKey));
 
   if (!cacheKey) {
-    core.info(`earthly cache is not found`);
+    core.info('earthly cache is not found');
     return false;
   }
 

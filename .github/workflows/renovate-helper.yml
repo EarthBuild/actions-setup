@@ -8,6 +8,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
   update-renovate-branch:
     if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'renovate/') && github.actor == 'renovate[bot]'
@@ -16,8 +18,8 @@ jobs:
       contents: write
     env:
       FORCE_COLOR: 1
-      EARTHLY_CONVERSION_PARALLELISM: "5"
-      EARTHLY_INSTALL_ID: "earthly-actions-setup-githubactions"
+      EARTHLY_CONVERSION_PARALLELISM: '5'
+      EARTHLY_INSTALL_ID: 'earthly-actions-setup-githubactions'
     steps:
       - uses: EarthBuild/actions-setup@main
         with:

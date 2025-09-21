@@ -1,15 +1,17 @@
-name: "Test action-install-earthly"
+name: 'Test action-install-earthly'
 on:
   pull_request:
   workflow_dispatch:
   push:
     branches:
-      - "main"
-      - "releases/*"
+      - 'main'
+      - 'releases/*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+permissions: {}
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -17,10 +19,12 @@ env:
 jobs:
   unit:
     name: earthly +all
+    permissions:
+      contents: read
     env:
       FORCE_COLOR: 1
-      EARTHLY_CONVERSION_PARALLELISM: "5"
-      EARTHLY_INSTALL_ID: "earthly-actions-setup-githubactions"
+      EARTHLY_CONVERSION_PARALLELISM: '5'
+      EARTHLY_INSTALL_ID: 'earthly-actions-setup-githubactions'
     strategy:
       matrix:
         platform: [ubuntu-latest]
@@ -32,12 +36,14 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: "22.x"
+          node-version: '22.19.0'
       - uses: ./
       - run: earthly +all
   # Below are tests specific to the github actions, which ensure the actions-setup code works with GHA
   latest:
     name: Test Latest Version Install
+    permissions:
+      contents: read
     strategy:
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-latest]
@@ -49,13 +55,15 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: "22.x"
+          node-version: '22.19.0'
       - run: npm install
       - run: npm run package
       - uses: ./
       - run: earthly --version
   specific:
     name: Test Specific Version Install
+    permissions:
+      contents: read
     strategy:
       matrix:
         # windows was not available < v0.5.15
@@ -68,7 +76,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: "22.x"
+          node-version: '22.19.0'
       - run: npm install
       - run: npm run package
       - uses: ./
@@ -77,6 +85,8 @@ jobs:
       - run: earthly --version
   patch-range:
     name: Test Patch Range Version Install
+    permissions:
+      contents: read
     strategy:
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-latest]
@@ -88,7 +98,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: "22.x"
+          node-version: '22.19.0'
       - run: npm install
       - run: npm run package
       - uses: ./
@@ -97,6 +107,8 @@ jobs:
       - run: earthly --version
   major-range:
     name: Test Patch Range Version Install
+    permissions:
+      contents: read
     strategy:
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-latest]
@@ -108,7 +120,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: "22.x"
+          node-version: '22.19.0'
       - run: npm install
       - run: npm run package
       - uses: ./

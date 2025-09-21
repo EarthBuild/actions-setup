@@ -4,13 +4,17 @@ on:
   release:
     types: [released]
 
+permissions: {}
+
 jobs:
   update-major-version-branch:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     env:
       FORCE_COLOR: 1
-      EARTHLY_CONVERSION_PARALLELISM: "5"
-      EARTHLY_INSTALL_ID: "earthly-actions-setup-githubactions"
+      EARTHLY_CONVERSION_PARALLELISM: '5'
+      EARTHLY_INSTALL_ID: 'earthly-actions-setup-githubactions'
     steps:
       - uses: earthly/actions/setup-earthly@v1
         with:
