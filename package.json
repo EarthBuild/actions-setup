@@ -34,7 +34,7 @@
     "semver": "7.7.2"
   },
   "devDependencies": {
-    "@types/node": "22.18.7",
+    "@types/node": "22.18.8",
     "@types/semver": "7.7.1",
     "@vercel/ncc": "0.38.1",
     "@vitest/coverage-v8": "3.2.4",
