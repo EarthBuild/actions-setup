@@ -6,7 +6,7 @@ ARG EARTHLY_LIB_VERSION=3.0.1
 IMPORT github.com/EarthBuild/lib/utils/git:$EARTHLY_LIB_VERSION AS git
 
 npm-base:
-    FROM node:22.19.0-alpine3.22@sha256:d2166de198f26e17e5a442f537754dd616ab069c47cc57b889310a717e0abbf9
+    FROM node:22.20.0-alpine3.22@sha256:cb3143549582cc5f74f26f0992cdef4a422b22128cb517f94173a5f910fa4ee7
     # renovate: datasource=npm packageName=npm
     ENV npm_version=11.6.1
     RUN npm i -g npm@$npm_version
