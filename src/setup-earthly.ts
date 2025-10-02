@@ -94,11 +94,8 @@ async function run() {
 
     // finally, dowload earthly release binary
 
-    await fs
-      .rm(installationDir, { recursive: true, force: true })
-      .then(() =>
-        core.info(`Successfully deleted pre-existing ${installationDir}`),
-      );
+    await fs.rm(installationDir, { recursive: true, force: true });
+    core.info(`Successfully deleted pre-existing ${installationDir}`);
 
     const buildURL = `https://github.com/earthly/earthly/releases/download/${
       tag_name
