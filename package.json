@@ -23,17 +23,14 @@
   "dependencies": {
     "@actions/cache": "4.1.0",
     "@actions/core": "1.11.1",
-    "@actions/github": "6.0.1",
     "@actions/io": "1.1.3",
     "@actions/tool-cache": "2.0.1",
     "@octokit/core": "7.0.0",
     "@octokit/plugin-paginate-rest": "13.0.0",
-    "make-dir": "5.1.0",
-    "mkdirp-promise": "5.0.1",
-    "node-fetch": "3.3.2",
     "semver": "7.7.2"
   },
   "devDependencies": {
+    "@octokit/types": "13.0.0",
     "@types/node": "22.18.8",
     "@types/semver": "7.7.1",
     "@vercel/ncc": "0.38.1",
@@ -46,5 +43,8 @@
     "typescript": "5.9.3",
     "typescript-eslint": "8.45.0",
     "vitest": "3.2.4"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-musl": "4.52.3"
   }
 }

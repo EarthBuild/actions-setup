@@ -6,16 +6,18 @@ ARG EARTHLY_LIB_VERSION=3.0.1
 IMPORT github.com/EarthBuild/lib/utils/git:$EARTHLY_LIB_VERSION AS git
 
 npm-base:
-    FROM node:22.12.0-alpine3.19@sha256:40dc4b415c17b85bea9be05314b4a753f45a4e1716bb31c01182e6c53d51a654
+    FROM node:22.19.0-alpine3.22@sha256:d2166de198f26e17e5a442f537754dd616ab069c47cc57b889310a717e0abbf9
+    # renovate: datasource=npm packageName=npm
+    ENV npm_version=11.6.1
+    RUN npm i -g npm@$npm_version
     WORKDIR /code
-    COPY package.json .
-    RUN npm install
-    # Output these back in case npm install changes them.
-    SAVE ARTIFACT package.json AS LOCAL ./package.json
+    COPY package.json package-lock.json .
+    RUN npm ci
 
 code:
     FROM +npm-base
     COPY --dir src .
+    COPY tsconfig.json .
 
 lint:
     FROM +code
@@ -29,7 +31,6 @@ lint:
       eslint.config.js \
       package.json \
       README.md \
-      tsconfig.json \
       vite.config.ts \
       vitest.config.ts \
       .
@@ -37,8 +38,6 @@ lint:
 
 compile:
     FROM +code
-    WORKDIR /code
-    COPY tsconfig.json .
     RUN npm run-script package
     SAVE ARTIFACT dist AS LOCAL dist
 
@@ -50,7 +49,6 @@ test-compile-was-run:
 
 test:
     FROM +code
-    COPY tsconfig.json .
     COPY vite.config.ts vitest.config.ts .
     RUN npm test
 
