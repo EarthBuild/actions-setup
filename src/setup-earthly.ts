@@ -1,10 +1,9 @@
-import * as fs from 'fs';
+import * as fs from 'node:fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import * as semver from 'semver';
 
 import * as core from '@actions/core';
-import * as io from '@actions/io';
 import * as tc from '@actions/tool-cache';
 
 import { restoreCache } from './cache-restore';
@@ -89,17 +88,17 @@ async function run() {
       semver.clean(tag_name) || tag_name.substring(1),
     );
     if (restored) {
-      await fs.promises.chmod(installationPath, 0o755);
+      await fs.chmod(installationPath, 0o755);
       return;
     }
 
     // finally, dowload earthly release binary
-    await io
-      .rmRF(installationDir)
-      .catch()
-      .then(() => {
-        core.info(`Successfully deleted pre-existing ${installationDir}`);
-      });
+
+    await fs
+      .rm(installationDir, { recursive: true, force: true })
+      .then(() =>
+        core.info(`Successfully deleted pre-existing ${installationDir}`),
+      );
 
     const buildURL = `https://github.com/earthly/earthly/releases/download/${
       tag_name
@@ -109,7 +108,7 @@ async function run() {
     const downloaded = await tc.downloadTool(buildURL, installationPath);
     core.debug(`successfully downloaded ${buildURL} to ${downloaded}`);
 
-    await fs.promises.chmod(installationPath, 0o755);
+    await fs.chmod(installationPath, 0o755);
 
     await tc.cacheDir(
       path.join(destination, 'bin'),
