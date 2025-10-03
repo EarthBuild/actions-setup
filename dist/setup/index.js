@@ -94232,8 +94232,8 @@ var __webpack_exports__ = {};
 // This entry need to be wrapped in an IIFE because it need to be isolated against other modules in the chunk.
 (() => {
 
-// EXTERNAL MODULE: external "fs"
-var external_fs_ = __nccwpck_require__(7147);
+;// CONCATENATED MODULE: external "node:fs/promises"
+const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs/promises");
 // EXTERNAL MODULE: external "os"
 var external_os_ = __nccwpck_require__(2037);
 // EXTERNAL MODULE: external "path"
@@ -94242,8 +94242,6 @@ var external_path_ = __nccwpck_require__(1017);
 var semver = __nccwpck_require__(1383);
 // EXTERNAL MODULE: ./node_modules/@actions/core/lib/core.js
 var core = __nccwpck_require__(2186);
-// EXTERNAL MODULE: ./node_modules/@actions/io/lib/io.js
-var io = __nccwpck_require__(7436);
 // EXTERNAL MODULE: ./node_modules/@actions/tool-cache/lib/tool-cache.js
 var tool_cache = __nccwpck_require__(7784);
 // EXTERNAL MODULE: ./node_modules/@actions/cache/lib/cache.js
@@ -95858,7 +95856,6 @@ function invariant(condition, message) {
 
 
 
-
 const IS_WINDOWS = process.platform === 'win32';
 async function run() {
     try {
@@ -95917,20 +95914,17 @@ async function run() {
         core.addPath(installationDir);
         const restored = await restoreCache(installationPath, semver.clean(tag_name) || tag_name.substring(1));
         if (restored) {
-            await external_fs_.promises.chmod(installationPath, 0o755);
+            await promises_namespaceObject.chmod(installationPath, 0o755);
             return;
         }
         // finally, dowload earthly release binary
-        await io.rmRF(installationDir)
-            .catch()
-            .then(() => {
-            core.info(`Successfully deleted pre-existing ${installationDir}`);
-        });
+        await promises_namespaceObject.rm(installationDir, { recursive: true, force: true })
+            .then(() => core.info(`Successfully deleted pre-existing ${installationDir}`));
         const buildURL = `https://github.com/earthly/earthly/releases/download/${tag_name}/${pkgName}-${releasePlatform}-${releaseArch}${IS_WINDOWS ? '.exe' : ''}`;
         core.info(`downloading ${buildURL}`);
         const downloaded = await tool_cache.downloadTool(buildURL, installationPath);
         core.debug(`successfully downloaded ${buildURL} to ${downloaded}`);
-        await external_fs_.promises.chmod(installationPath, 0o755);
+        await promises_namespaceObject.chmod(installationPath, 0o755);
         await tool_cache.cacheDir(external_path_.join(destination, 'bin'), pkgName, semver.clean(tag_name) || tag_name.substring(1), external_os_.arch());
         core.exportVariable('FORCE_COLOR', '1');
     }
