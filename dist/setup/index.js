@@ -95918,8 +95918,8 @@ async function run() {
             return;
         }
         // finally, dowload earthly release binary
-        await promises_namespaceObject.rm(installationDir, { recursive: true, force: true })
-            .then(() => core.info(`Successfully deleted pre-existing ${installationDir}`));
+        await promises_namespaceObject.rm(installationDir, { recursive: true, force: true });
+        core.info(`Successfully deleted pre-existing ${installationDir}`);
         const buildURL = `https://github.com/earthly/earthly/releases/download/${tag_name}/${pkgName}-${releasePlatform}-${releaseArch}${IS_WINDOWS ? '.exe' : ''}`;
         core.info(`downloading ${buildURL}`);
         const downloaded = await tool_cache.downloadTool(buildURL, installationPath);
