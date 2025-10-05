@@ -1,23 +1,23 @@
 {
-  "name": "setup-earthly",
+  "name": "setup-earthbuild",
   "version": "0.0.0",
   "private": true,
-  "description": "Setup the earthly in a GitHub Actions build environment",
+  "description": "Setup the EarthBuild in a GitHub Actions build environment",
   "main": "dist/index.js",
   "scripts": {
-    "package": "ncc build -o dist/setup src/setup-earthly.ts --source-map --license LICENSE && ncc build -o dist/cache-save src/cache-save.ts --source-map --license LICENSE",
+    "package": "ncc build -o dist/setup src/setup.ts --source-map --license LICENSE && ncc build -o dist/cache-save src/cache-save.ts --source-map --license LICENSE",
     "test": "vitest run --coverage src/**/*",
     "lint": "eslint ."
   },
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/earthly/actions-setup.git"
+    "url": "git+https://github.com/earthbuild/actions-setup.git"
   },
-  "author": "earthly technologies",
+  "author": "EarthBuild",
   "keywords": [
     "actions",
-    "earthly",
+    "EarthBuild",
     "setup"
   ],
   "dependencies": {

@@ -16,7 +16,7 @@ export const restoreCache = async (
   const platform = process.env.RUNNER_OS;
   const arch = process.env.RUNNER_ARCH;
 
-  const primaryKey = `earthly-cache-${platform}-${arch}-${version}`;
+  const primaryKey = `earthbuild-cache-${platform}-${arch}-${version}`;
   core.debug(`primary key is ${primaryKey}`);
 
   core.saveState(State.CachePrimaryKey, primaryKey);
@@ -26,7 +26,7 @@ export const restoreCache = async (
   core.setOutput('cache-hit', Boolean(cacheKey));
 
   if (!cacheKey) {
-    core.info('earthly cache is not found');
+    core.info('EarthBuild cache is not found');
     return false;
   }
 

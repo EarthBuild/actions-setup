@@ -1,12 +1,10 @@
 VERSION 0.8
 
-PROJECT earthly-technologies/core
-
-ARG EARTHLY_LIB_VERSION=3.0.1
-IMPORT github.com/EarthBuild/lib/utils/git:$EARTHLY_LIB_VERSION AS git
+ARG EARTHBUILD_LIB_VERSION=3.0.1
+IMPORT github.com/EarthBuild/lib/utils/git:$EARTHBUILD_LIB_VERSION AS git
 
 npm-base:
-    FROM node:22.20.0-alpine3.22@sha256:cb3143549582cc5f74f26f0992cdef4a422b22128cb517f94173a5f910fa4ee7
+    FROM node:24.9.0-alpine3.22@sha256:77f3c4d1f33c17dfa4af4b0add57d86957187873e313c2c37f52831d117645c8
     # renovate: datasource=npm packageName=npm
     ENV npm_version=11.6.1
     RUN npm i -g npm@$npm_version
@@ -58,10 +56,10 @@ test-run:
     ENV RUNNER_TOOL_CACHE=/tmp/cache-dir
     RUN node dist/setup/index.js | tee output
     RUN ! grep 'Found tool in cache' output
-    RUN cat output | grep '^::add-path::' | sed 's/::add-path:://g' > earthly-path
-    RUN test "$(cat earthly-path)" = "/root/.earthly/bin"
+    RUN cat output | grep '^::add-path::' | sed 's/::add-path:://g' > earthbuild-path
+    RUN test "$(cat earthbuild-path)" = "/root/.earthly/bin"
     # [a-zA-Z0-9]* attempt to match a commit hash
-    RUN export PATH="$(cat earthly-path):$PATH" && earthly --version | tee version.output
+    RUN export PATH="$(cat earthbuild-path):$PATH" && earthly --version | tee version.output
     RUN grep -E '^earthly version v.*linux/(arm|amd)64; Alpine Linux' version.output
 
     # validate cache was used
@@ -74,7 +72,7 @@ merge-release-to-major-branch:
         git config --global user.email "littleredcorvette@users.noreply.github.com" && \
         git config --global url."git@github.com:".insteadOf "https://github.com/"
 
-    ARG git_repo="earthly/actions-setup"
+    ARG git_repo="earthbuild/actions-setup"
     ARG git_url="git@github.com:$git_repo"
     ARG SECRET_PATH=littleredcorvette-id_rsa
     DO --pass-args git+DEEP_CLONE --GIT_URL=$git_url --SECRET_PATH=$SECRET_PATH

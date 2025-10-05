@@ -1,22 +1,22 @@
-name: Setup earthly
-description: Installs the Earthly binary
+name: Setup EarthBuild
+description: Installs the EarthBuild binary
 branding:
   icon: 'sunrise'
   color: 'green'
-author: Earthly technologies
+author: EarthBuild
 inputs:
   version:
-    description: 'version of earthly to use.'
+    description: 'version of EarthBuild to use.'
     default: 'latest'
   prerelease:
     description: 'allow prerelease versions'
     default: 'false'
   use-cache:
-    description: 'whether to use the cache to store earthly or not'
+    description: 'whether to use the cache to store EarthBuild or not'
     default: 'true'
   github-token:
-    description: 'GitHub token for fetching Earthly version list.'
+    description: 'GitHub token for fetching EarthBuild version list.'
 runs:
-  using: node20
+  using: node24
   main: dist/setup/index.js
   post: 'dist/cache-save/index.js'

@@ -17610,7 +17610,7 @@ var https = __nccwpck_require__(5687);
 var parseUrl = (__nccwpck_require__(7310).parse);
 var fs = __nccwpck_require__(7147);
 var Stream = (__nccwpck_require__(2781).Stream);
-var mime = __nccwpck_require__(3583);
+var mime = __nccwpck_require__(1021);
 var asynckit = __nccwpck_require__(6284);
 var populate = __nccwpck_require__(3971);
 
@@ -53921,7 +53921,7 @@ module.exports = __nccwpck_require__(3765)
 
 /***/ }),
 
-/***/ 3583:
+/***/ 1021:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 /*!
@@ -94289,14 +94289,14 @@ const restoreCache = async (path, version) => {
     }
     const platform = process.env.RUNNER_OS;
     const arch = process.env.RUNNER_ARCH;
-    const primaryKey = `earthly-cache-${platform}-${arch}-${version}`;
+    const primaryKey = `earthbuild-cache-${platform}-${arch}-${version}`;
     core.debug(`primary key is ${primaryKey}`);
     core.saveState(State.CachePrimaryKey, primaryKey);
     core.saveState(State.BinaryPath, path);
     const cacheKey = await cache.restoreCache([path], primaryKey);
     core.setOutput('cache-hit', Boolean(cacheKey));
     if (!cacheKey) {
-        core.info('earthly cache is not found');
+        core.info('EarthBuild cache is not found');
         return false;
     }
     core.saveState(State.CacheMatchedKey, cacheKey);
@@ -95847,7 +95847,7 @@ function invariant(condition, message) {
     }
 }
 
-;// CONCATENATED MODULE: ./src/setup-earthly.ts
+;// CONCATENATED MODULE: ./src/setup.ts
 
 
 
@@ -95917,7 +95917,7 @@ async function run() {
             await promises_namespaceObject.chmod(installationPath, 0o755);
             return;
         }
-        // finally, dowload earthly release binary
+        // finally, dowload EarthBuild release binary
         await promises_namespaceObject.rm(installationDir, { recursive: true, force: true });
         core.info(`Successfully deleted pre-existing ${installationDir}`);
         const buildURL = `https://github.com/earthly/earthly/releases/download/${tag_name}/${pkgName}-${releasePlatform}-${releaseArch}${IS_WINDOWS ? '.exe' : ''}`;
