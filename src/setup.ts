@@ -92,7 +92,7 @@ async function run() {
       return;
     }
 
-    // finally, dowload earthly release binary
+    // finally, dowload EarthBuild release binary
 
     await fs.rm(installationDir, { recursive: true, force: true });
     core.info(`Successfully deleted pre-existing ${installationDir}`);

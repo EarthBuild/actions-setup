@@ -18,8 +18,8 @@ jobs:
       contents: write
     env:
       FORCE_COLOR: 1
-      EARTHLY_CONVERSION_PARALLELISM: '5'
-      EARTHLY_INSTALL_ID: 'earthly-actions-setup-githubactions'
+      EARTHLY_CONVERSION_PARALLELISM: "5"
+      EARTHLY_INSTALL_ID: "actions-setup"
     steps:
       - uses: EarthBuild/actions-setup@main
         with:

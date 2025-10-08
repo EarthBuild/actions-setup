@@ -1,8 +1,8 @@
-import { getVersionObject } from '../get-version';
 import * as semver from 'semver';
+import { getVersionObject } from '../get-version';
 
 // The latest version since this test was last changed
-// Feel free to update it if earthly has been updated
+// Feel free to update it if Earthbuild has been updated
 const latest = '0.6.23';
 
 describe('get-version', () => {
