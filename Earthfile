@@ -40,7 +40,7 @@ compile:
     SAVE ARTIFACT dist AS LOCAL dist
 
 test-compile-was-run:
-    FROM alpine:3.22@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
+    FROM alpine:3.22@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
     COPY +compile/dist /from-git
     COPY +compile/dist /from-compile
     RUN diff -r /from-git /from-compile >/dev/null || (echo "dist and +compile/dist are different, did you forget to run earthly +compile?" && exit 1)
