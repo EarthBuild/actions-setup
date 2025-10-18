@@ -7,10 +7,10 @@ npm-base:
     FROM node:24.10.0-alpine3.22@sha256:6ff78d6d45f2614fe0da54756b44a7c529a15ebcaf9832fab8df036b1d466e73
     # renovate: datasource=npm packageName=npm
     ENV npm_version=11.6.2
-    RUN npm i -g npm@$npm_version
+    RUN --secret GITHUB_TOKEN npm i -g npm@$npm_version
     WORKDIR /code
     COPY package.json package-lock.json .
-    RUN npm ci
+    RUN --secret GITHUB_TOKEN npm ci
 
 code:
     FROM +npm-base
@@ -48,7 +48,7 @@ test-compile-was-run:
 test:
     FROM +code
     COPY vite.config.ts vitest.config.ts .
-    RUN npm test
+    RUN --secret GITHUB_TOKEN npm test
 
 test-run:
     FROM +npm-base
