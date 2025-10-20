@@ -10,7 +10,7 @@ npm-base:
     RUN npm i -g npm@$npm_version
     WORKDIR /code
     COPY package.json package-lock.json .
-    RUN --secret GITHUB_TOKEN npm ci
+    RUN npm ci
 
 code:
     FROM +npm-base
