@@ -30,6 +30,10 @@ jobs:
         platform: [ubuntu-latest]
     runs-on: ${{ matrix.platform }}
     steps:
+      - name: Set up Docker Hub mirrors
+        run: |
+          echo '{"registry-mirrors": ["https://mirror.gcr.io", "https://public.ecr.aws"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -38,7 +42,7 @@ jobs:
           cache: ${{ !env.ACT && 'npm' || '' }}
           node-version: '22.20.0'
       - uses: ./
-      - run: earthly +all
+      - run: earthly --secret GITHUB_TOKEN +all
   # Below are tests specific to the github actions, which ensure the actions-setup code works with GHA
   latest:
     name: Test Latest Version Install

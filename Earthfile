@@ -48,7 +48,7 @@ test-compile-was-run:
 test:
     FROM +code
     COPY vite.config.ts vitest.config.ts .
-    RUN npm test
+    RUN --secret GITHUB_TOKEN npm test
 
 test-run:
     FROM +npm-base
