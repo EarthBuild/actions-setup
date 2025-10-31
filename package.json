@@ -25,11 +25,11 @@
     "@actions/core": "1.11.1",
     "@actions/tool-cache": "2.0.1",
     "@octokit/core": "7.0.5",
-    "@octokit/plugin-paginate-rest": "13.2.1",
+    "@octokit/plugin-paginate-rest": "14.0.0",
     "semver": "7.7.3"
   },
   "devDependencies": {
-    "@octokit/types": "13.10.0",
+    "@octokit/types": "16.0.0",
     "@types/node": "24.9.2",
     "@types/semver": "7.7.1",
     "@vercel/ncc": "0.38.1",
