@@ -94879,7 +94879,7 @@ class RequestError extends Error {
 
 
 // pkg/dist-src/version.js
-var dist_bundle_VERSION = "10.0.5";
+var dist_bundle_VERSION = "10.0.6";
 
 // pkg/dist-src/defaults.js
 var defaults_default = {
@@ -95250,7 +95250,7 @@ var createTokenAuth = function createTokenAuth2(token) {
 
 
 ;// CONCATENATED MODULE: ./node_modules/@octokit/core/dist-src/version.js
-const version_VERSION = "7.0.5";
+const version_VERSION = "7.0.6";
 
 
 ;// CONCATENATED MODULE: ./node_modules/@octokit/core/dist-src/index.js
