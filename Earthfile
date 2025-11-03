@@ -67,7 +67,7 @@ test-run:
     RUN grep 'Found tool in cache' output2
 
 merge-release-to-major-branch:
-    FROM alpine/git:2.49.1@sha256:94b40c2135951103e0c5c7db07ae4cf6e935644a717e05d17f0c540db47683af
+    FROM alpine/git:2.49.1@sha256:6a349a8e142f1e62429377904c5eff5ff3d956bfe2bdf8acc1a84c85794632eb
     RUN git config --global user.name "littleredcorvette" && \
         git config --global user.email "littleredcorvette@users.noreply.github.com" && \
         git config --global url."git@github.com:".insteadOf "https://github.com/"
