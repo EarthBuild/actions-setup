@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "@octokit/types": "16.0.0",
-    "@types/node": "24.10.0",
+    "@types/node": "24.10.1",
     "@types/semver": "7.7.1",
     "@vercel/ncc": "0.38.1",
     "@vitest/coverage-v8": "4.0.8",
