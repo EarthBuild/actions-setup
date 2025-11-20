@@ -32,7 +32,7 @@
     "@octokit/types": "16.0.0",
     "@types/node": "24.10.1",
     "@types/semver": "7.7.1",
-    "@vercel/ncc": "0.38.1",
+    "@vercel/ncc": "0.38.4",
     "@vitest/coverage-v8": "4.0.9",
     "eslint": "9.39.1",
     "eslint-config-prettier": "10.1.8",
