@@ -33,7 +33,7 @@
     "@types/node": "24.10.1",
     "@types/semver": "7.7.1",
     "@vercel/ncc": "0.38.1",
-    "@vitest/coverage-v8": "4.0.13",
+    "@vitest/coverage-v8": "4.0.14",
     "eslint": "9.39.1",
     "eslint-config-prettier": "10.1.8",
     "eslint-plugin-prettier": "5.5.4",
@@ -41,7 +41,7 @@
     "prettier-eslint": "16.4.2",
     "typescript": "5.9.3",
     "typescript-eslint": "8.48.0",
-    "vitest": "4.0.13"
+    "vitest": "4.0.14"
   },
   "optionalDependencies": {
     "@rollup/rollup-linux-x64-musl": "4.53.3"
