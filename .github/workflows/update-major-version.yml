@@ -10,7 +10,7 @@ jobs:
   update-major-version-branch:
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     env:
       FORCE_COLOR: 1
       EARTHLY_CONVERSION_PARALLELISM: '5'
