@@ -22,7 +22,7 @@
   ],
   "dependencies": {
     "@actions/cache": "5.0.1",
-    "@actions/core": "2.0.0",
+    "@actions/core": "2.0.1",
     "@actions/tool-cache": "2.0.1",
     "@octokit/core": "7.0.6",
     "@octokit/plugin-paginate-rest": "14.0.0",
