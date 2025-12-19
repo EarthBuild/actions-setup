@@ -21,7 +21,7 @@
     "setup"
   ],
   "dependencies": {
-    "@actions/cache": "4.1.0",
+    "@actions/cache": "5.0.1",
     "@actions/core": "2.0.0",
     "@actions/tool-cache": "2.0.1",
     "@octokit/core": "7.0.6",
