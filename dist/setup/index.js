@@ -96958,11 +96958,11 @@ async function run() {
             // only grab the version from the api if the version provided by the user
             // doesn't appear to be a valid semver
             // const prerelease = core.getInput('prerelease').toUpperCase() === 'TRUE';
-            //TODO: undo this
+            //TODO: undo next two lines and uncomment previous line
             const prerelease = true;
+            const range = 'v0.8.17-rc-0';
             core.info(`Configured range: ${range}; allow prerelease: ${prerelease}`);
             const version = await getVersionObject(range, prerelease);
-            core.info(`Configured version: ${version}`);
             tag_name = version.tag_name;
         }
         const destination = external_path_.join(external_os_.homedir(), `.${pkgName}`);
