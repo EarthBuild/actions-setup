@@ -95324,9 +95324,9 @@ var cache = __nccwpck_require__(27799);
 ;// CONCATENATED MODULE: ./src/constants.ts
 var State;
 (function (State) {
-    State["CachePrimaryKey"] = "EARTHLY_CACHE_KEY";
-    State["CacheMatchedKey"] = "EARTHLY_CACHE_RESULT";
-    State["BinaryPath"] = "EARTHLY_BINARY_PATH";
+    State["CachePrimaryKey"] = "EARTHBUILD_CACHE_KEY";
+    State["CacheMatchedKey"] = "EARTHBUILD_CACHE_RESULT";
+    State["BinaryPath"] = "EARTHBUILD_BINARY_PATH";
 })(State || (State = {}));
 var Outputs;
 (function (Outputs) {
@@ -96873,8 +96873,8 @@ async function getVersionObject(range, prerelease) {
         auth: core.getInput('github-token') || process.env.GITHUB_TOKEN || undefined,
     });
     const versions = (await octokit.paginate('GET /repos/{owner}/{repo}/releases', {
-        owner: 'earthly',
-        repo: 'earthly',
+        owner: 'EarthBuild',
+        repo: 'earthbuild',
         per_page: 100,
     }))
         .filter((release) => {
@@ -96957,9 +96957,12 @@ async function run() {
         else {
             // only grab the version from the api if the version provided by the user
             // doesn't appear to be a valid semver
-            const prerelease = core.getInput('prerelease').toUpperCase() === 'TRUE';
+            // const prerelease = core.getInput('prerelease').toUpperCase() === 'TRUE';
+            //TODO: undo this
+            const prerelease = true;
             core.info(`Configured range: ${range}; allow prerelease: ${prerelease}`);
             const version = await getVersionObject(range, prerelease);
+            core.info(`Configured version: ${version}`);
             tag_name = version.tag_name;
         }
         const destination = external_path_.join(external_os_.homedir(), `.${pkgName}`);
@@ -96967,14 +96970,14 @@ async function run() {
         const installationDir = external_path_.join(destination, 'bin');
         const installationPath = external_path_.join(installationDir, `${pkgName}${IS_WINDOWS ? '.exe' : ''}`);
         core.info(`Matched version: ${tag_name}`);
-        // first see if earthly is in the toolcache (installed locally)
+        // first see if earthbuild is in the toolcache (installed locally)
         const toolcacheDir = tool_cache.find(pkgName, semver.clean(tag_name) || tag_name.substring(1), external_os_.arch());
         if (toolcacheDir) {
             core.addPath(toolcacheDir);
-            core.info(`using earthly from toolcache (${toolcacheDir})`);
+            core.info(`using earthbuild from toolcache (${toolcacheDir})`);
             return;
         }
-        // then try to restore earthly from the github action cache
+        // then try to restore earthbuild from the github action cache
         core.addPath(installationDir);
         const restored = await restoreCache(installationPath, semver.clean(tag_name) || tag_name.substring(1));
         if (restored) {
@@ -96984,7 +96987,7 @@ async function run() {
         // finally, dowload EarthBuild release binary
         await promises_namespaceObject.rm(installationDir, { recursive: true, force: true });
         core.info(`Successfully deleted pre-existing ${installationDir}`);
-        const buildURL = `https://github.com/earthly/earthly/releases/download/${tag_name}/${pkgName}-${releasePlatform}-${releaseArch}${IS_WINDOWS ? '.exe' : ''}`;
+        const buildURL = `https://github.com/EarthBuild/earthbuild/releases/download/${tag_name}/${pkgName}-${releasePlatform}-${releaseArch}${IS_WINDOWS ? '.exe' : ''}`;
         core.info(`downloading ${buildURL}`);
         const downloaded = await tool_cache.downloadTool(buildURL, installationPath);
         core.debug(`successfully downloaded ${buildURL} to ${downloaded}`);
