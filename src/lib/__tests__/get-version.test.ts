@@ -38,7 +38,7 @@ describe('get-version', () => {
       { spec: '0.8.*', valid: false },
       { spec: 'v0.8.17', valid: false },
       { spec: '0.8.17', valid: true },
-      { spec: '0.8.17-rc-0', valid: true },
+      { spec: '0.8.17-rc-1', valid: true },
     ] as const)('%s is valid semantic version', async (test) => {
       console.log(JSON.stringify(test));
       const v = semver.valid(test.spec) != null;
