@@ -3,7 +3,7 @@ import { getVersionObject } from '../get-version';
 
 // The latest version since this test was last changed
 // Feel free to update it if Earthbuild has been updated
-const latest = '0.8.17-rc-0';
+const latest = '0.8.17-rc-1';
 
 describe('get-version', () => {
   describe('latest range versions', () => {
