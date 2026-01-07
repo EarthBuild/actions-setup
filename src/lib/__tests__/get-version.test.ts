@@ -24,7 +24,7 @@ describe('get-version', () => {
       // { spec: '0.4.*', gte: '0.4.0', lt: '0.5.0' },
       // { spec: 'v0.4.*', gte: '0.4.0', lt: '0.5.0' },
       // { spec: '0.6.1', eq: '0.6.1' },
-      { spec: 'v0.8.17-rc-0', eq: '0.8.17-rc-0' },
+      { spec: 'v0.8.17-rc-1', eq: '0.8.17-rc-1' },
     ] as const)('should match %s versions', async (test) => {
       console.log(JSON.stringify(test));
       const v = await getVersionObject(test.spec, true); //TODO: switch off prerelease when have stable release
