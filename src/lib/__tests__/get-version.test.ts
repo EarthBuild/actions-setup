@@ -13,7 +13,7 @@ describe('get-version', () => {
       // '^0',
       // '0.*.*',
       // '0.8.*',
-      '0.8.17-rc-0',
+      '0.8.17-rc-1',
     ] as const)('should match %s versions', async (ver) => {
       const v = await getVersionObject(ver, true); //TODO: switch off prerelease when have stable release
       expect(semver.gte(v.tag_name, latest));
