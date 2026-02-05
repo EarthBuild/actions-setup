@@ -44,6 +44,6 @@
     "vitest": "4.0.18"
   },
   "optionalDependencies": {
-    "@rollup/rollup-linux-x64-musl": "4.56.0"
+    "@rollup/rollup-linux-x64-musl": "4.57.1"
   }
 }
