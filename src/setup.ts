@@ -25,7 +25,7 @@ async function run() {
       win32: 'windows',
     };
     const runnerPlatform = os.platform();
-    const pkgName = 'earthly';
+    const pkgName = 'earth';
 
     if (!(runnerPlatform in nodePlatformToReleasePlatform)) {
       throw new Error(
