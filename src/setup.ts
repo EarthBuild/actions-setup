@@ -25,7 +25,7 @@ async function run() {
       win32: 'windows',
     };
     const runnerPlatform = os.platform();
-    const pkgName = 'earthly';
+    const pkgName = 'earth';
 
     if (!(runnerPlatform in nodePlatformToReleasePlatform)) {
       throw new Error(
@@ -68,7 +68,7 @@ async function run() {
     );
     core.info(`Matched version: ${tag_name}`);
 
-    // first see if earthly is in the toolcache (installed locally)
+    // first see if earthbuild is in the toolcache (installed locally)
     const toolcacheDir = tc.find(
       pkgName,
       semver.clean(tag_name) || tag_name.substring(1),
@@ -77,11 +77,11 @@ async function run() {
 
     if (toolcacheDir) {
       core.addPath(toolcacheDir);
-      core.info(`using earthly from toolcache (${toolcacheDir})`);
+      core.info(`using earthbuild from toolcache (${toolcacheDir})`);
       return;
     }
 
-    // then try to restore earthly from the github action cache
+    // then try to restore earthbuild from the github action cache
     core.addPath(installationDir);
     const restored = await restoreCache(
       installationPath,
@@ -97,7 +97,7 @@ async function run() {
     await fs.rm(installationDir, { recursive: true, force: true });
     core.info(`Successfully deleted pre-existing ${installationDir}`);
 
-    const buildURL = `https://github.com/earthly/earthly/releases/download/${
+    const buildURL = `https://github.com/EarthBuild/earthbuild/releases/download/${
       tag_name
     }/${pkgName}-${releasePlatform}-${releaseArch}${IS_WINDOWS ? '.exe' : ''}`;
 
