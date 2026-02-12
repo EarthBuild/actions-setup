@@ -21,29 +21,29 @@
     "setup"
   ],
   "dependencies": {
-    "@actions/cache": "5.0.1",
-    "@actions/core": "2.0.1",
-    "@actions/tool-cache": "2.0.2",
+    "@actions/cache": "6.0.0",
+    "@actions/core": "3.0.0",
+    "@actions/tool-cache": "4.0.0",
     "@octokit/core": "7.0.6",
     "@octokit/plugin-paginate-rest": "14.0.0",
-    "semver": "7.7.3"
+    "semver": "7.7.4"
   },
   "devDependencies": {
     "@octokit/types": "16.0.0",
-    "@types/node": "24.10.4",
+    "@types/node": "24.10.12",
     "@types/semver": "7.7.1",
     "@vercel/ncc": "0.38.1",
-    "@vitest/coverage-v8": "4.0.16",
+    "@vitest/coverage-v8": "4.0.18",
     "eslint": "9.39.2",
     "eslint-config-prettier": "10.1.8",
-    "eslint-plugin-prettier": "5.5.4",
-    "prettier": "3.7.4",
+    "eslint-plugin-prettier": "5.5.5",
+    "prettier": "3.8.1",
     "prettier-eslint": "16.4.2",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.51.0",
-    "vitest": "4.0.16"
+    "typescript-eslint": "8.54.0",
+    "vitest": "4.0.18"
   },
   "optionalDependencies": {
-    "@rollup/rollup-linux-x64-musl": "4.54.0"
+    "@rollup/rollup-linux-x64-musl": "4.57.1"
   }
 }
