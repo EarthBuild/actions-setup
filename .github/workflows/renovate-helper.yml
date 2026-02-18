@@ -28,7 +28,7 @@ jobs:
         with:
           ref: ${{ github.head_ref }}
       - name: Build
-        run: earthly --ci --output +compile
+        run: earth --ci --output +compile
       - name: Commit changes
         run: |
           git config user.name "${{ github.actor }}"

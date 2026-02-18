@@ -23,4 +23,4 @@ jobs:
         with:
           ref: ${{ github.ref }}
       - name: Update Branch
-        run: earthly --ci -P --push +merge-release-to-major-branch --RELEASE_TAG=${{ github.ref }}
+        run: earth --ci -P --push +merge-release-to-major-branch --RELEASE_TAG=${{ github.ref }}

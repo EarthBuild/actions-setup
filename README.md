@@ -1,8 +1,8 @@
-# Setup Earthly - GitHub Action
+# Setup EarthBuild - GitHub Action
 
-This repository contains an action for use with GitHub Actions, which installs [earthly](https://github.com/EarthBuild/earthbuild) with a semver-compatible version.
+This repository contains an action for use with GitHub Actions, which installs [earth](https://github.com/EarthBuild/earthbuild) with a semver-compatible version.
 
-The package is installed into `/home/runner/.earthly` (or equivalent on Windows) and the `bin` subdirectory is added to the PATH.
+The package is installed into `/home/runner/.earth` (or equivalent on Windows) and the `bin` subdirectory is added to the PATH.
 
 ## Usage
 
@@ -30,9 +30,9 @@ jobs:
       - name: Docker login # to avoid dockerhub rate-limiting
         run: docker login --username "${{ secrets.DOCKERHUB_USERNAME }}" --password "${{ secrets.DOCKERHUB_PASSWORD }}"
       - name: what version is installed?
-        run: earthly --version
+        run: earth --version
       - name: run the earthbuild hello world
-        run: earthly github.com/EarthBuild/hello-world:main+hello
+        run: earth github.com/EarthBuild/hello-world:main+hello
 ```
 
 Install the latest version of earthbuild:
@@ -66,7 +66,7 @@ Install a version that adheres to a semver range
 
 ### Testing
 
-You can perform a local test by running `earthly +all`.
+You can perform a local test by running `earth +all`.
 
 It is also possible to use [act](https://github.com/nektos/act) to test the contents of the github actions config.
 
