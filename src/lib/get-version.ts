@@ -18,8 +18,8 @@ export async function getVersionObject(
   });
   const versions = (
     await octokit.paginate('GET /repos/{owner}/{repo}/releases', {
-      owner: 'EarthBuild',
-      repo: 'earthbuild',
+      owner: 'earthly',
+      repo: 'earthly',
       per_page: 100,
     })
   )

@@ -1,7 +1,7 @@
 export enum State {
-  CachePrimaryKey = 'EARTHBUILD_CACHE_KEY',
-  CacheMatchedKey = 'EARTHBUILD_CACHE_RESULT',
-  BinaryPath = 'EARTHBUILD_BINARY_PATH',
+  CachePrimaryKey = 'EARTHLY_CACHE_KEY',
+  CacheMatchedKey = 'EARTHLY_CACHE_RESULT',
+  BinaryPath = 'EARTHLY_BINARY_PATH',
 }
 
 export enum Outputs {
