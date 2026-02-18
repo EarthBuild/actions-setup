@@ -1,6 +1,6 @@
 # Setup Earthly - GitHub Action
 
-This repository contains an action for use with GitHub Actions, which installs [earthly](https://github.com/EarthBuild/earthbuild) with a semver-compatible version.
+This repository contains an action for use with GitHub Actions, which installs [earthly](https://github.com/earthly/earthly) with a semver-compatible version.
 
 The package is installed into `/home/runner/.earthly` (or equivalent on Windows) and the `bin` subdirectory is added to the PATH.
 
@@ -19,10 +19,10 @@ on:
 
 jobs:
   tests:
-    name: example earthbuild test
+    name: example earthly test
     runs-on: ubuntu-latest
     steps:
-      - uses: EarthBuild/actions-setup@v1
+      - uses: earthly/actions-setup@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           version: 'latest' # or pin to an specific version, e.g. "0.8.1"
@@ -31,24 +31,24 @@ jobs:
         run: docker login --username "${{ secrets.DOCKERHUB_USERNAME }}" --password "${{ secrets.DOCKERHUB_PASSWORD }}"
       - name: what version is installed?
         run: earthly --version
-      - name: run the earthbuild hello world
-        run: earthly github.com/EarthBuild/hello-world:main+hello
+      - name: run the earthly hello world
+        run: earthly github.com/earthly/hello-world:main+hello
 ```
 
-Install the latest version of earthbuild:
+Install the latest version of earthly:
 
 ```yaml
-- name: Install earthbuild
-  uses: EarthBuild/actions-setup@v1
+- name: Install earthly
+  uses: earthly/actions-setup@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-Install a specific version of earthbuild:
+Install a specific version of earthly:
 
 ```yaml
-- name: Install earthbuild
-  uses: EarthBuild/actions-setup@v1
+- name: Install earthly
+  uses: earthly/actions-setup@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     version: 0.8.1
@@ -57,8 +57,8 @@ Install a specific version of earthbuild:
 Install a version that adheres to a semver range
 
 ```yaml
-- name: Install EarthBuild
-  uses: EarthBuild/actions-setup@v1
+- name: Install earthly
+  uses: earthly/actions-setup@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     version: ^0.8.0
@@ -74,7 +74,7 @@ It is also possible to use [act](https://github.com/nektos/act) to test the cont
 
 The action can be configured with the following arguments:
 
-- `version` - The version of earthbuild to install. Default is `latest`. Accepts semver style values.
+- `version` - The version of earthly to install. Default is `latest`. Accepts semver style values.
 - `prerelease` (optional) - allow prerelease versions.
-- `use-cache` (optional) - whether to use the cache to store earthbuild or not.
-- `github-token` (optional) - GitHub token for fetching earthbuild version list. Recommended to avoid GitHub API ratelimit.
+- `use-cache` (optional) - whether to use the cache to store earthly or not.
+- `github-token` (optional) - GitHub token for fetching earthly version list. Recommended to avoid GitHub API ratelimit.

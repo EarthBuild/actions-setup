@@ -85227,9 +85227,9 @@ function saveCacheV2(paths_1, key_1, options_1) {
 ;// CONCATENATED MODULE: ./src/constants.ts
 var State;
 (function (State) {
-    State["CachePrimaryKey"] = "EARTHBUILD_CACHE_KEY";
-    State["CacheMatchedKey"] = "EARTHBUILD_CACHE_RESULT";
-    State["BinaryPath"] = "EARTHBUILD_BINARY_PATH";
+    State["CachePrimaryKey"] = "EARTHLY_CACHE_KEY";
+    State["CacheMatchedKey"] = "EARTHLY_CACHE_RESULT";
+    State["BinaryPath"] = "EARTHLY_BINARY_PATH";
 })(State || (State = {}));
 var Outputs;
 (function (Outputs) {
@@ -86776,8 +86776,8 @@ async function getVersionObject(range, prerelease) {
         auth: getInput('github-token') || process.env.GITHUB_TOKEN || undefined,
     });
     const versions = (await octokit.paginate('GET /repos/{owner}/{repo}/releases', {
-        owner: 'EarthBuild',
-        repo: 'earthbuild',
+        owner: 'earthly',
+        repo: 'earthly',
         per_page: 100,
     }))
         .filter((release) => {
@@ -86838,7 +86838,7 @@ async function run() {
             win32: 'windows',
         };
         const runnerPlatform = external_os_.platform();
-        const pkgName = 'earth';
+        const pkgName = 'earthly';
         if (!(runnerPlatform in nodePlatformToReleasePlatform)) {
             throw new Error(`Unsupported operating system - ${pkgName} is only released for ${Object.keys(nodePlatformToReleasePlatform).join(', ')}`);
         }
@@ -86870,14 +86870,14 @@ async function run() {
         const installationDir = external_path_.join(destination, 'bin');
         const installationPath = external_path_.join(installationDir, `${pkgName}${setup_IS_WINDOWS ? '.exe' : ''}`);
         info(`Matched version: ${tag_name}`);
-        // first see if earthbuild is in the toolcache (installed locally)
+        // first see if earthly is in the toolcache (installed locally)
         const toolcacheDir = find(pkgName, node_modules_semver.clean(tag_name) || tag_name.substring(1), external_os_.arch());
         if (toolcacheDir) {
             addPath(toolcacheDir);
-            info(`using earthbuild from toolcache (${toolcacheDir})`);
+            info(`using earthly from toolcache (${toolcacheDir})`);
             return;
         }
-        // then try to restore earthbuild from the github action cache
+        // then try to restore earthly from the github action cache
         addPath(installationDir);
         const restored = await cache_restore_restoreCache(installationPath, node_modules_semver.clean(tag_name) || tag_name.substring(1));
         if (restored) {
@@ -86887,7 +86887,7 @@ async function run() {
         // finally, dowload EarthBuild release binary
         await promises_namespaceObject.rm(installationDir, { recursive: true, force: true });
         info(`Successfully deleted pre-existing ${installationDir}`);
-        const buildURL = `https://github.com/EarthBuild/earthbuild/releases/download/${tag_name}/${pkgName}-${releasePlatform}-${releaseArch}${setup_IS_WINDOWS ? '.exe' : ''}`;
+        const buildURL = `https://github.com/earthly/earthly/releases/download/${tag_name}/${pkgName}-${releasePlatform}-${releaseArch}${setup_IS_WINDOWS ? '.exe' : ''}`;
         info(`downloading ${buildURL}`);
         const downloaded = await downloadTool(buildURL, installationPath);
         core_debug(`successfully downloaded ${buildURL} to ${downloaded}`);

@@ -12,7 +12,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/EarthBuild/actions-setup.git"
+    "url": "git+https://github.com/earthbuild/actions-setup.git"
   },
   "author": "EarthBuild",
   "keywords": [

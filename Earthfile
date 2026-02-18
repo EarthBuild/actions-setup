@@ -34,10 +34,6 @@ lint:
       .
     RUN npm run-script lint
 
-fmt:
-    LOCALLY
-    RUN npx prettier --write .
-
 compile:
     FROM +code
     RUN npm run-script package
@@ -61,14 +57,14 @@ test-run:
     RUN node dist/setup/index.js | tee output
     RUN ! grep 'Found tool in cache' output
     RUN cat output | grep '^::add-path::' | sed 's/::add-path:://g' > earthbuild-path
-    # RUN test "$(cat earthbuild-path)" = "/root/.earthly/bin"
-    # # [a-zA-Z0-9]* attempt to match a commit hash
-    # RUN export PATH="$(cat earthbuild-path):$PATH" && earthly --version | tee version.output
-    # RUN grep -E '^earthly version v.*linux/(arm|amd)64; Alpine Linux' version.output
+    RUN test "$(cat earthbuild-path)" = "/root/.earthly/bin"
+    # [a-zA-Z0-9]* attempt to match a commit hash
+    RUN export PATH="$(cat earthbuild-path):$PATH" && earthly --version | tee version.output
+    RUN grep -E '^earthly version v.*linux/(arm|amd)64; Alpine Linux' version.output
 
-    # # validate cache was used
-    # RUN node dist/setup/index.js | tee output2
-    # RUN grep 'Found tool in cache' output2
+    # validate cache was used
+    RUN node dist/setup/index.js | tee output2
+    RUN grep 'Found tool in cache' output2
 
 merge-release-to-major-branch:
     FROM alpine/git:v2.52.0@sha256:3b7890cb947afd3f71adab55aa6b549ad0f8ddc4b9ed28b027563d73d49d8e11
