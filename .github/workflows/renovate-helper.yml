@@ -18,8 +18,8 @@ jobs:
       contents: write
     env:
       FORCE_COLOR: 1
-      EARTHLY_CONVERSION_PARALLELISM: "5"
-      EARTHLY_INSTALL_ID: "actions-setup"
+      EARTHLY_CONVERSION_PARALLELISM: '5'
+      EARTHLY_INSTALL_ID: 'actions-setup'
     steps:
       - uses: EarthBuild/actions-setup@main
         with:
@@ -34,5 +34,9 @@ jobs:
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git add dist
-          git diff --staged --quiet && echo "nothing to commit" || git commit -m "ci: update dist for Renovate"
+          if git diff --staged --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "ci: update dist for Renovate"
+          fi
           git push

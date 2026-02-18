@@ -84278,9 +84278,9 @@ function saveCacheV2(paths_1, key_1, options_1) {
 ;// CONCATENATED MODULE: ./src/constants.ts
 var State;
 (function (State) {
-    State["CachePrimaryKey"] = "EARTHLY_CACHE_KEY";
-    State["CacheMatchedKey"] = "EARTHLY_CACHE_RESULT";
-    State["BinaryPath"] = "EARTHLY_BINARY_PATH";
+    State["CachePrimaryKey"] = "EARTHBUILD_CACHE_KEY";
+    State["CacheMatchedKey"] = "EARTHBUILD_CACHE_RESULT";
+    State["BinaryPath"] = "EARTHBUILD_BINARY_PATH";
 })(State || (State = {}));
 var Outputs;
 (function (Outputs) {
