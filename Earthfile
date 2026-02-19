@@ -34,6 +34,10 @@ lint:
       .
     RUN npm run-script lint
 
+fmt:
+    LOCALLY
+    RUN npx prettier --write .
+
 compile:
     FROM +code
     RUN npm run-script package
@@ -43,7 +47,7 @@ test-compile-was-run:
     FROM alpine:3.23@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
     COPY +compile/dist /from-git
     COPY +compile/dist /from-compile
-    RUN diff -r /from-git /from-compile >/dev/null || (echo "dist and +compile/dist are different, did you forget to run earthly +compile?" && exit 1)
+    RUN diff -r /from-git /from-compile >/dev/null || (echo "dist and +compile/dist are different, did you forget to run earth +compile?" && exit 1)
 
 test:
     FROM +code
@@ -57,10 +61,10 @@ test-run:
     RUN node dist/setup/index.js | tee output
     RUN ! grep 'Found tool in cache' output
     RUN cat output | grep '^::add-path::' | sed 's/::add-path:://g' > earthbuild-path
-    RUN test "$(cat earthbuild-path)" = "/root/.earthly/bin"
+    RUN test "$(cat earthbuild-path)" = "/root/.earth/bin"
     # [a-zA-Z0-9]* attempt to match a commit hash
-    RUN export PATH="$(cat earthbuild-path):$PATH" && earthly --version | tee version.output
-    RUN grep -E '^earthly version v.*linux/(arm|amd)64; Alpine Linux' version.output
+    RUN export PATH="$(cat earthbuild-path):$PATH" && earth --version | tee version.output
+    RUN grep -E '^earth version v.*linux/(arm|amd)64; Alpine Linux' version.output
 
     # validate cache was used
     RUN node dist/setup/index.js | tee output2

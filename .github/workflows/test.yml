@@ -1,4 +1,4 @@
-name: 'Test action-install-earthly'
+name: 'Test action-install-earth'
 on:
   pull_request:
   workflow_dispatch:
@@ -18,13 +18,13 @@ env:
 
 jobs:
   unit:
-    name: earthly +all
+    name: earth +all
     permissions:
       contents: read
     env:
       FORCE_COLOR: 1
       EARTHLY_CONVERSION_PARALLELISM: '5'
-      EARTHLY_INSTALL_ID: 'earthly-actions-setup-githubactions'
+      EARTHLY_INSTALL_ID: 'earthbuild-actions-setup-githubactions'
     strategy:
       matrix:
         platform: [ubuntu-latest]
@@ -42,7 +42,7 @@ jobs:
           cache: ${{ !env.ACT && 'npm' || '' }}
           node-version: '24.13.1'
       - uses: ./
-      - run: earthly --secret GITHUB_TOKEN +all
+      - run: earth --secret GITHUB_TOKEN +all
   # Below are tests specific to the github actions, which ensure the actions-setup code works with GHA
   latest:
     name: Test Latest Version Install
@@ -63,14 +63,13 @@ jobs:
       - run: npm install
       - run: npm run package
       - uses: ./
-      - run: earthly --version
+      - run: earth --version
   specific:
     name: Test Specific Version Install
     permissions:
       contents: read
     strategy:
       matrix:
-        # windows was not available < v0.5.15
         platform: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
     steps:
@@ -85,8 +84,8 @@ jobs:
       - run: npm run package
       - uses: ./
         with:
-          version: 0.5.15
-      - run: earthly --version
+          version: 0.8.17
+      - run: earth --version
   patch-range:
     name: Test Patch Range Version Install
     permissions:
@@ -107,8 +106,8 @@ jobs:
       - run: npm run package
       - uses: ./
         with:
-          version: 0.6.*
-      - run: earthly --version
+          version: 0.8.*
+      - run: earth --version
   major-range:
     name: Test Patch Range Version Install
     permissions:
@@ -129,5 +128,5 @@ jobs:
       - run: npm run package
       - uses: ./
         with:
-          version: ^0.6.1
-      - run: earthly --version
+          version: ^0.8.17
+      - run: earth --version
