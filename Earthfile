@@ -4,7 +4,7 @@ ARG EARTHBUILD_LIB_VERSION=3.0.1
 IMPORT github.com/EarthBuild/lib/utils/git:$EARTHBUILD_LIB_VERSION AS git
 
 npm-base:
-    FROM node:24.13.0-alpine3.23@sha256:cd6fb7efa6490f039f3471a189214d5f548c11df1ff9e5b181aa49e22c14383e
+    FROM node:24.13.1-alpine3.23@sha256:4f696fbf39f383c1e486030ba6b289a5d9af541642fc78ab197e584a113b9c03
     # renovate: datasource=npm packageName=npm
     ENV npm_version=11.9.0
     RUN npm i -g npm@$npm_version
