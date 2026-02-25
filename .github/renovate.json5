@@ -20,5 +20,12 @@
       ],
     },
   ],
+  packageRules: [
+    {
+      matchManagers: ['github-actions'],
+      matchPackageNames: ['EarthBuild/actions-setup'],
+      enabled: false,
+    },
+  ],
   labels: ['renovate'],
 }
