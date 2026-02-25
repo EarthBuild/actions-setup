@@ -4,9 +4,9 @@ ARG EARTHBUILD_LIB_VERSION=3.0.1
 IMPORT github.com/EarthBuild/lib/utils/git:$EARTHBUILD_LIB_VERSION AS git
 
 npm-base:
-    FROM node:24.13.0-alpine3.23@sha256:cd6fb7efa6490f039f3471a189214d5f548c11df1ff9e5b181aa49e22c14383e
+    FROM node:24.14.0-alpine3.23@sha256:7fddd9ddeae8196abf4a3ef2de34e11f7b1a722119f91f28ddf1e99dcafdf114
     # renovate: datasource=npm packageName=npm
-    ENV npm_version=11.9.0
+    ENV npm_version=11.10.1
     RUN npm i -g npm@$npm_version
     WORKDIR /code
     COPY package.json package-lock.json .
@@ -34,6 +34,10 @@ lint:
       .
     RUN npm run-script lint
 
+fmt:
+    LOCALLY
+    RUN npx prettier --write .
+
 compile:
     FROM +code
     RUN npm run-script package
@@ -43,7 +47,7 @@ test-compile-was-run:
     FROM alpine:3.23@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
     COPY +compile/dist /from-git
     COPY +compile/dist /from-compile
-    RUN diff -r /from-git /from-compile >/dev/null || (echo "dist and +compile/dist are different, did you forget to run earthly +compile?" && exit 1)
+    RUN diff -r /from-git /from-compile >/dev/null || (echo "dist and +compile/dist are different, did you forget to run earth +compile?" && exit 1)
 
 test:
     FROM +code
@@ -57,17 +61,17 @@ test-run:
     RUN node dist/setup/index.js | tee output
     RUN ! grep 'Found tool in cache' output
     RUN cat output | grep '^::add-path::' | sed 's/::add-path:://g' > earthbuild-path
-    RUN test "$(cat earthbuild-path)" = "/root/.earthly/bin"
+    RUN test "$(cat earthbuild-path)" = "/root/.earth/bin"
     # [a-zA-Z0-9]* attempt to match a commit hash
-    RUN export PATH="$(cat earthbuild-path):$PATH" && earthly --version | tee version.output
-    RUN grep -E '^earthly version v.*linux/(arm|amd)64; Alpine Linux' version.output
+    RUN export PATH="$(cat earthbuild-path):$PATH" && earth --version | tee version.output
+    RUN grep -E '^earth version v.*linux/(arm|amd)64; Alpine Linux' version.output
 
     # validate cache was used
     RUN node dist/setup/index.js | tee output2
     RUN grep 'Found tool in cache' output2
 
 merge-release-to-major-branch:
-    FROM alpine/git:v2.52.0@sha256:3b7890cb947afd3f71adab55aa6b549ad0f8ddc4b9ed28b027563d73d49d8e11
+    FROM alpine/git:v2.52.0@sha256:d453f54c83320412aa89c391b076930bd8569bc1012285e8c68ce2d4435826a3
     RUN git config --global user.name "littleredcorvette" && \
         git config --global user.email "littleredcorvette@users.noreply.github.com" && \
         git config --global url."git@github.com:".insteadOf "https://github.com/"

@@ -3,11 +3,11 @@ import { getVersionObject } from '../get-version';
 
 // The latest version since this test was last changed
 // Feel free to update it if Earthbuild has been updated
-const latest = '0.6.23';
+const latest = '0.8.17';
 
 describe('get-version', () => {
   describe('latest range versions', () => {
-    it.each(['latest', '*', '^0', '0.*.*', '0.6.*'] as const)(
+    it.each(['latest', '*', '^0', '0.*.*', '0.8.*'] as const)(
       'should match %s versions',
       async (ver) => {
         const v = await getVersionObject(ver, false);
@@ -17,10 +17,10 @@ describe('get-version', () => {
   });
   describe('range versions', () => {
     it.each([
-      { spec: '0.4.*', gte: '0.4.0', lt: '0.5.0' },
-      { spec: 'v0.4.*', gte: '0.4.0', lt: '0.5.0' },
-      { spec: '0.6.1', eq: '0.6.1' },
-      { spec: 'v0.6.0', eq: '0.6.0' },
+      { spec: '0.8.*', gte: '0.8.0', lt: '0.9.0' },
+      { spec: 'v0.8.*', gte: '0.8.0', lt: '0.9.0' },
+      { spec: '0.8.17', eq: '0.8.17' },
+      { spec: 'v0.8.17', eq: '0.8.17' },
     ] as const)('should match %s versions', async (test) => {
       console.log(JSON.stringify(test));
       const v = await getVersionObject(test.spec, false);
@@ -31,9 +31,9 @@ describe('get-version', () => {
   });
   describe('valid semver', () => {
     it.each([
-      { spec: '0.4.*', valid: false },
-      { spec: 'v0.4.1', valid: false },
-      { spec: '0.6.1', valid: true },
+      { spec: '0.8.*', valid: false },
+      { spec: 'v0.8.17', valid: false },
+      { spec: '0.8.17', valid: true },
     ] as const)('%s is valid semantic version', async (test) => {
       console.log(JSON.stringify(test));
       const v = semver.valid(test.spec) != null;
