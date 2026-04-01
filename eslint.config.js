@@ -6,6 +6,20 @@ import tseslint from 'typescript-eslint';
 export default defineConfig(
   { ignores: ['dist/**', 'coverage/**'] },
   eslint.configs.recommended,
-  tseslint.configs.recommended,
+  tseslint.configs.strictTypeChecked,
+  {
+    languageOptions: {
+      parserOptions: {
+        projectService: {
+          allowDefaultProject: [
+            'eslint.config.js',
+            'vite.config.ts',
+            'vitest.config.ts',
+          ],
+        },
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
   eslintPluginPrettierRecommended,
 );

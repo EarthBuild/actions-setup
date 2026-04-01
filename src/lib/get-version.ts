@@ -25,19 +25,14 @@ export async function getVersionObject(
   )
     .filter((release) => {
       // we expect each version to have at least 6 assets before it can be considered as latest available version
-      return (prerelease || !release.prerelease) && release.assets?.length > 5;
+      return (prerelease || !release.prerelease) && release.assets.length > 5;
     })
-    .reduce(
-      (acc, cur) => {
-        // remove 'v' from tag name
-        const tag = cur.tag_name.substring(1);
-
-        acc[tag] = cur;
-
-        return acc;
-      },
-      {} as Record<string, ReleaseResponse>,
-    );
+    .reduce<Record<string, ReleaseResponse>>((acc, cur) => {
+      // remove 'v' from tag name
+      const tag = cur.tag_name.substring(1);
+      acc[tag] = cur;
+      return acc;
+    }, {});
 
   if (range == 'latest') {
     const latest = Object.keys(versions).reduce((prev, cur) => {

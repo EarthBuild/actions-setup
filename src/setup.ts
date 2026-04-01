@@ -53,7 +53,9 @@ async function run() {
       // only grab the version from the api if the version provided by the user
       // doesn't appear to be a valid semver
       const prerelease = core.getInput('prerelease').toUpperCase() === 'TRUE';
-      core.info(`Configured range: ${range}; allow prerelease: ${prerelease}`);
+      core.info(
+        `Configured range: ${range}; allow prerelease: ${String(prerelease)}`,
+      );
       const version = await getVersionObject(range, prerelease);
       tag_name = version.tag_name;
     }
@@ -123,4 +125,4 @@ async function run() {
   }
 }
 
-run();
+void run();

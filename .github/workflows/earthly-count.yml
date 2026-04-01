@@ -22,16 +22,17 @@ jobs:
         run: |
           # Count total occurrences
           total_count=$(git grep -i "earthly" -- ':!.github/workflows/earthly-count.yml' 2>/dev/null | wc -l || echo "0")
-          echo "total_count=$total_count" >> $GITHUB_OUTPUT
-
           # Count by file type
           go_count=$(git grep -i "earthly" -- "*.go" 2>/dev/null | wc -l || echo "0")
           md_count=$(git grep -i "earthly" -- "*.md" 2>/dev/null | wc -l || echo "0")
           earthfile_count=$(($(git grep -i "earthly" -- "Earthfile" 2>/dev/null | wc -l || echo "0") + $(git grep -i "earthly" -- "*.earth" 2>/dev/null | wc -l || echo "0")))
 
-          echo "go_count=$go_count" >> $GITHUB_OUTPUT
-          echo "md_count=$md_count" >> $GITHUB_OUTPUT
-          echo "earthfile_count=$earthfile_count" >> $GITHUB_OUTPUT
+          {
+            echo "total_count=$total_count"
+            echo "go_count=$go_count"
+            echo "md_count=$md_count"
+            echo "earthfile_count=$earthfile_count"
+          } >> "$GITHUB_OUTPUT"
 
           echo "PR branch - Total: $total_count (Go: $go_count, MD: $md_count, Earthfiles: $earthfile_count)"
 
@@ -44,16 +45,17 @@ jobs:
         run: |
           # Count total occurrences
           total_count=$(git grep -i "earthly" -- ':!.github/workflows/earthly-count.yml' 2>/dev/null | wc -l || echo "0")
-          echo "main_total_count=$total_count" >> $GITHUB_OUTPUT
-
           # Count by file type
           go_count=$(git grep -i "earthly" -- "*.go" 2>/dev/null | wc -l || echo "0")
           md_count=$(git grep -i "earthly" -- "*.md" 2>/dev/null | wc -l || echo "0")
           earthfile_count=$(($(git grep -i "earthly" -- "Earthfile" 2>/dev/null | wc -l || echo "0") + $(git grep -i "earthly" -- "*.earth" 2>/dev/null | wc -l || echo "0")))
 
-          echo "main_go_count=$go_count" >> $GITHUB_OUTPUT
-          echo "main_md_count=$md_count" >> $GITHUB_OUTPUT
-          echo "main_earthfile_count=$earthfile_count" >> $GITHUB_OUTPUT
+          {
+            echo "main_total_count=$total_count"
+            echo "main_go_count=$go_count"
+            echo "main_md_count=$md_count"
+            echo "main_earthfile_count=$earthfile_count"
+          } >> "$GITHUB_OUTPUT"
 
           echo "Main branch - Total: $total_count (Go: $go_count, MD: $md_count, Earthfiles: $earthfile_count)"
 
@@ -65,26 +67,27 @@ jobs:
           difference=$((main_count - pr_count))
 
           # Calculate percentage with proper formatting
-          if [ $main_count -gt 0 ]; then
+          if [ "$main_count" -gt 0 ]; then
             # Use awk for better decimal handling
             percentage=$(awk "BEGIN {printf \"%.2f\", $difference * 100 / $main_count}")
           else
             percentage="0.00"
           fi
 
-          echo "difference=$difference" >> $GITHUB_OUTPUT
-          echo "percentage=$percentage" >> $GITHUB_OUTPUT
-          echo "pr_count=$pr_count" >> $GITHUB_OUTPUT
-          echo "main_count=$main_count" >> $GITHUB_OUTPUT
-
           # Calculate differences by type
           go_diff=$((${{ steps.count_main.outputs.main_go_count }} - ${{ steps.count_pr.outputs.go_count }}))
           md_diff=$((${{ steps.count_main.outputs.main_md_count }} - ${{ steps.count_pr.outputs.md_count }}))
           earthfile_diff=$((${{ steps.count_main.outputs.main_earthfile_count }} - ${{ steps.count_pr.outputs.earthfile_count }}))
 
-          echo "go_diff=$go_diff" >> $GITHUB_OUTPUT
-          echo "md_diff=$md_diff" >> $GITHUB_OUTPUT
-          echo "earthfile_diff=$earthfile_diff" >> $GITHUB_OUTPUT
+          {
+            echo "difference=$difference"
+            echo "percentage=$percentage"
+            echo "pr_count=$pr_count"
+            echo "main_count=$main_count"
+            echo "go_diff=$go_diff"
+            echo "md_diff=$md_diff"
+            echo "earthfile_diff=$earthfile_diff"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Comment on PR
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd #v8.0.0

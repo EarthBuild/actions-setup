@@ -13,8 +13,8 @@ export const restoreCache = async (
     return false;
   }
 
-  const platform = process.env.RUNNER_OS;
-  const arch = process.env.RUNNER_ARCH;
+  const platform = process.env.RUNNER_OS ?? 'unknown';
+  const arch = process.env.RUNNER_ARCH ?? 'unknown';
 
   const primaryKey = `earthbuild-cache-${platform}-${arch}-${version}`;
   core.debug(`primary key is ${primaryKey}`);
