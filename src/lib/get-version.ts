@@ -44,7 +44,9 @@ export async function getVersionObject(
       return gte(cur, prev) ? cur : prev;
     });
     invariant(latest, 'expect a latest version to exists');
-    return versions[latest];
+    const latestVersion = versions[latest];
+    invariant(latestVersion, `expect version ${latest} to exist`);
+    return latestVersion;
   }
 
   const resp = maxSatisfying(Object.keys(versions), range);

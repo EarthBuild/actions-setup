@@ -13,11 +13,11 @@ const IS_WINDOWS = process.platform === 'win32';
 
 async function run() {
   try {
-    const nodeArchToReleaseArch = {
+    const nodeArchToReleaseArch: Record<string, string> = {
       x64: 'amd64',
-      arm: 'arm64',
+      arm64: 'arm64',
     };
-    const nodePlatformToReleasePlatform = {
+    const nodePlatformToReleasePlatform: Record<string, string> = {
       darwin: 'darwin',
       freebsd: 'freebsd',
       linux: 'linux',
@@ -27,7 +27,8 @@ async function run() {
     const runnerPlatform = os.platform();
     const pkgName = 'earth';
 
-    if (!(runnerPlatform in nodePlatformToReleasePlatform)) {
+    const releasePlatform = nodePlatformToReleasePlatform[runnerPlatform];
+    if (!releasePlatform) {
       throw new Error(
         `Unsupported operating system - ${pkgName} is only released for ${Object.keys(
           nodePlatformToReleasePlatform,
@@ -35,9 +36,8 @@ async function run() {
       );
     }
 
-    const releasePlatform = nodePlatformToReleasePlatform[runnerPlatform];
     const osArch = os.arch();
-    const releaseArch = nodeArchToReleaseArch[os.arch()] || osArch;
+    const releaseArch = nodeArchToReleaseArch[osArch] || osArch;
 
     const range = core.getInput('version');
     const isValidSemVer = semver.valid(range) != null;

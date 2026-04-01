@@ -26,6 +26,12 @@
       matchPackageNames: ['EarthBuild/actions-setup'],
       enabled: false,
     },
+    {
+      description: 'Vulnerability fixes bypass the 7-day cooldown',
+      matchCategories: ['security'],
+      minimumReleaseAge: '0 days',
+    },
   ],
+  minimumReleaseAge: '7 days',
   labels: ['renovate'],
 }
