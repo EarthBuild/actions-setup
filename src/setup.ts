@@ -15,7 +15,7 @@ async function run() {
   try {
     const nodeArchToReleaseArch: Record<string, string> = {
       x64: 'amd64',
-      arm64: 'arm64',
+      arm: 'arm64',
     };
     const nodePlatformToReleasePlatform: Record<string, string> = {
       darwin: 'darwin',
