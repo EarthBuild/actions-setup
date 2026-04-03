@@ -21,7 +21,7 @@ export async function run() {
     if (error instanceof Error) {
       core.setFailed(error.message);
     } else {
-      core.setFailed(`unknown error: ${error}`);
+      core.setFailed(`unknown error: ${String(error)}`);
     }
   }
 }
@@ -64,13 +64,13 @@ export const cacheBinary = async () => {
       } else if (error.name === cache.ReserveCacheError.name) {
         core.info(error.message);
       } else {
-        core.warning(`${error.message}`);
+        core.warning(error.message);
       }
     } else {
-      core.error(`unknown error encountered: ${error}`);
+      core.error(`unknown error encountered: ${String(error)}`);
       throw error;
     }
   }
 };
 
-run();
+void run();

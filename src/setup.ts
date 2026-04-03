@@ -13,11 +13,11 @@ const IS_WINDOWS = process.platform === 'win32';
 
 async function run() {
   try {
-    const nodeArchToReleaseArch = {
+    const nodeArchToReleaseArch: Record<string, string> = {
       x64: 'amd64',
       arm: 'arm64',
     };
-    const nodePlatformToReleasePlatform = {
+    const nodePlatformToReleasePlatform: Record<string, string> = {
       darwin: 'darwin',
       freebsd: 'freebsd',
       linux: 'linux',
@@ -27,7 +27,8 @@ async function run() {
     const runnerPlatform = os.platform();
     const pkgName = 'earth';
 
-    if (!(runnerPlatform in nodePlatformToReleasePlatform)) {
+    const releasePlatform = nodePlatformToReleasePlatform[runnerPlatform];
+    if (!releasePlatform) {
       throw new Error(
         `Unsupported operating system - ${pkgName} is only released for ${Object.keys(
           nodePlatformToReleasePlatform,
@@ -35,9 +36,8 @@ async function run() {
       );
     }
 
-    const releasePlatform = nodePlatformToReleasePlatform[runnerPlatform];
     const osArch = os.arch();
-    const releaseArch = nodeArchToReleaseArch[os.arch()] || osArch;
+    const releaseArch = nodeArchToReleaseArch[osArch] || osArch;
 
     const range = core.getInput('version');
     const isValidSemVer = semver.valid(range) != null;
@@ -53,7 +53,9 @@ async function run() {
       // only grab the version from the api if the version provided by the user
       // doesn't appear to be a valid semver
       const prerelease = core.getInput('prerelease').toUpperCase() === 'TRUE';
-      core.info(`Configured range: ${range}; allow prerelease: ${prerelease}`);
+      core.info(
+        `Configured range: ${range}; allow prerelease: ${String(prerelease)}`,
+      );
       const version = await getVersionObject(range, prerelease);
       tag_name = version.tag_name;
     }
@@ -123,4 +125,4 @@ async function run() {
   }
 }
 
-run();
+void run();
