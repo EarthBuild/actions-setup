@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: EarthBuild/actions-setup@main
         with:
-          version: v0.8.16
+          version: v0.8.17
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.head_ref }}
