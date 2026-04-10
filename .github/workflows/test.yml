@@ -22,7 +22,6 @@ jobs:
     permissions:
       contents: read
     env:
-      FORCE_COLOR: 1
       EARTHLY_CONVERSION_PARALLELISM: '5'
       EARTHLY_INSTALL_ID: 'earthbuild-actions-setup-githubactions'
     strategy:

@@ -13,6 +13,8 @@ const IS_WINDOWS = process.platform === 'win32';
 
 async function run() {
   try {
+    core.exportVariable('FORCE_COLOR', process.env.FORCE_COLOR ?? '1');
+
     const nodeArchToReleaseArch: Record<string, string> = {
       x64: 'amd64',
       arm: 'arm64',
@@ -115,7 +117,6 @@ async function run() {
       semver.clean(tag_name) || tag_name.substring(1),
       os.arch(),
     );
-    core.exportVariable('FORCE_COLOR', '1');
   } catch (error: unknown) {
     if (error instanceof Error) {
       core.setFailed(error.message);
