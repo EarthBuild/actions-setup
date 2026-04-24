@@ -15149,7 +15149,6 @@ function defaultFactory (origin, opts) {
 
 class Agent extends DispatcherBase {
   constructor ({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
-    super()
 
     if (typeof factory !== 'function') {
       throw new InvalidArgumentError('factory must be a function.')
@@ -15162,6 +15161,8 @@ class Agent extends DispatcherBase {
     if (!Number.isInteger(maxRedirections) || maxRedirections < 0) {
       throw new InvalidArgumentError('maxRedirections must be a positive number')
     }
+
+    super(options)
 
     if (connect && typeof connect !== 'function') {
       connect = { ...connect }
@@ -17711,9 +17712,10 @@ class Client extends DispatcherBase {
     autoSelectFamilyAttemptTimeout,
     // h2
     maxConcurrentStreams,
-    allowH2
+    allowH2,
+    webSocket
   } = {}) {
-    super()
+    super({ webSocket })
 
     if (keepAlive !== undefined) {
       throw new InvalidArgumentError('unsupported keepAlive, use pipelining=0 instead')
@@ -18245,15 +18247,23 @@ const { kDestroy, kClose, kClosed, kDestroyed, kDispatch, kInterceptors } = __nc
 const kOnDestroyed = Symbol('onDestroyed')
 const kOnClosed = Symbol('onClosed')
 const kInterceptedDispatch = Symbol('Intercepted Dispatch')
+const kWebSocketOptions = Symbol('webSocketOptions')
 
 class DispatcherBase extends Dispatcher {
-  constructor () {
+  constructor (opts) {
     super()
 
     this[kDestroyed] = false
     this[kOnDestroyed] = null
     this[kClosed] = false
     this[kOnClosed] = []
+    this[kWebSocketOptions] = opts?.webSocket ?? {}
+  }
+
+  get webSocketOptions () {
+    return {
+      maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+    }
   }
 
   get destroyed () {
@@ -18813,8 +18823,8 @@ const kRemoveClient = Symbol('remove client')
 const kStats = Symbol('stats')
 
 class PoolBase extends DispatcherBase {
-  constructor () {
-    super()
+  constructor (opts) {
+    super(opts)
 
     this[kQueue] = new FixedQueue()
     this[kClients] = []
@@ -19073,8 +19083,6 @@ class Pool extends PoolBase {
     allowH2,
     ...options
   } = {}) {
-    super()
-
     if (connections != null && (!Number.isFinite(connections) || connections < 0)) {
       throw new InvalidArgumentError('invalid connections')
     }
@@ -19098,6 +19106,8 @@ class Pool extends PoolBase {
         ...connect
       })
     }
+
+    super(options)
 
     this[kInterceptors] = options.interceptors?.Pool && Array.isArray(options.interceptors.Pool)
       ? options.interceptors.Pool
@@ -36853,40 +36863,35 @@ const tail = Buffer.from([0x00, 0x00, 0xff, 0xff])
 const kBuffer = Symbol('kBuffer')
 const kLength = Symbol('kLength')
 
-// Default maximum decompressed message size: 4 MB
-const kDefaultMaxDecompressedSize = 4 * 1024 * 1024
-
 class PerMessageDeflate {
   /** @type {import('node:zlib').InflateRaw} */
   #inflate
 
   #options = {}
 
-  /** @type {boolean} */
-  #aborted = false
-
-  /** @type {Function|null} */
-  #currentCallback = null
+  #maxPayloadSize = 0
 
   /**
    * @param {Map<string, string>} extensions
    */
-  constructor (extensions) {
+  constructor (extensions, options) {
     this.#options.serverNoContextTakeover = extensions.has('server_no_context_takeover')
     this.#options.serverMaxWindowBits = extensions.get('server_max_window_bits')
+
+    this.#maxPayloadSize = options.maxPayloadSize
   }
 
+  /**
+   * Decompress a compressed payload.
+   * @param {Buffer} chunk Compressed data
+   * @param {boolean} fin Final fragment flag
+   * @param {Function} callback Callback function
+   */
   decompress (chunk, fin, callback) {
     // An endpoint uses the following algorithm to decompress a message.
     // 1.  Append 4 octets of 0x00 0x00 0xff 0xff to the tail end of the
     //     payload of the message.
     // 2.  Decompress the resulting data using DEFLATE.
-
-    if (this.#aborted) {
-      callback(new MessageSizeExceededError())
-      return
-    }
-
     if (!this.#inflate) {
       let windowBits = Z_DEFAULT_WINDOWBITS
 
@@ -36909,23 +36914,12 @@ class PerMessageDeflate {
       this.#inflate[kLength] = 0
 
       this.#inflate.on('data', (data) => {
-        if (this.#aborted) {
-          return
-        }
-
         this.#inflate[kLength] += data.length
 
-        if (this.#inflate[kLength] > kDefaultMaxDecompressedSize) {
-          this.#aborted = true
+        if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
+          callback(new MessageSizeExceededError())
           this.#inflate.removeAllListeners()
-          this.#inflate.destroy()
           this.#inflate = null
-
-          if (this.#currentCallback) {
-            const cb = this.#currentCallback
-            this.#currentCallback = null
-            cb(new MessageSizeExceededError())
-          }
           return
         }
 
@@ -36938,14 +36932,13 @@ class PerMessageDeflate {
       })
     }
 
-    this.#currentCallback = callback
     this.#inflate.write(chunk)
     if (fin) {
       this.#inflate.write(tail)
     }
 
     this.#inflate.flush(() => {
-      if (this.#aborted || !this.#inflate) {
+      if (!this.#inflate) {
         return
       }
 
@@ -36953,7 +36946,6 @@ class PerMessageDeflate {
 
       this.#inflate[kBuffer].length = 0
       this.#inflate[kLength] = 0
-      this.#currentCallback = null
 
       callback(null, full)
     })
@@ -36988,6 +36980,7 @@ const {
 const { WebsocketFrameSend } = __nccwpck_require__(2391)
 const { closeWebSocketConnection } = __nccwpck_require__(8380)
 const { PerMessageDeflate } = __nccwpck_require__(8236)
+const { MessageSizeExceededError } = __nccwpck_require__(8045)
 
 // This code was influenced by ws released under the MIT license.
 // Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>
@@ -36996,6 +36989,7 @@ const { PerMessageDeflate } = __nccwpck_require__(8236)
 
 class ByteParser extends Writable {
   #buffers = []
+  #fragmentsBytes = 0
   #byteOffset = 0
   #loop = false
 
@@ -37007,18 +37001,23 @@ class ByteParser extends Writable {
   /** @type {Map<string, PerMessageDeflate>} */
   #extensions
 
+  /** @type {number} */
+  #maxPayloadSize
+
   /**
    * @param {import('./websocket').WebSocket} ws
    * @param {Map<string, string>|null} extensions
+   * @param {{ maxPayloadSize?: number }} [options]
    */
-  constructor (ws, extensions) {
+  constructor (ws, extensions, options = {}) {
     super()
 
     this.ws = ws
     this.#extensions = extensions == null ? new Map() : extensions
+    this.#maxPayloadSize = options.maxPayloadSize ?? 0
 
     if (this.#extensions.has('permessage-deflate')) {
-      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions))
+      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions, options))
     }
   }
 
@@ -37032,6 +37031,19 @@ class ByteParser extends Writable {
     this.#loop = true
 
     this.run(callback)
+  }
+
+  #validatePayloadLength () {
+    if (
+      this.#maxPayloadSize > 0 &&
+      !isControlFrame(this.#info.opcode) &&
+      this.#info.payloadLength > this.#maxPayloadSize
+    ) {
+      failWebsocketConnection(this.ws, 'Payload size exceeds maximum allowed size')
+      return false
+    }
+
+    return true
   }
 
   /**
@@ -37122,6 +37134,10 @@ class ByteParser extends Writable {
         if (payloadLength <= 125) {
           this.#info.payloadLength = payloadLength
           this.#state = parserStates.READ_DATA
+
+          if (!this.#validatePayloadLength()) {
+            return
+          }
         } else if (payloadLength === 126) {
           this.#state = parserStates.PAYLOADLENGTH_16
         } else if (payloadLength === 127) {
@@ -37146,6 +37162,10 @@ class ByteParser extends Writable {
 
         this.#info.payloadLength = buffer.readUInt16BE(0)
         this.#state = parserStates.READ_DATA
+
+        if (!this.#validatePayloadLength()) {
+          return
+        }
       } else if (this.#state === parserStates.PAYLOADLENGTH_64) {
         if (this.#byteOffset < 8) {
           return callback()
@@ -37168,6 +37188,10 @@ class ByteParser extends Writable {
 
         this.#info.payloadLength = lower
         this.#state = parserStates.READ_DATA
+
+        if (!this.#validatePayloadLength()) {
+          return
+        }
       } else if (this.#state === parserStates.READ_DATA) {
         if (this.#byteOffset < this.#info.payloadLength) {
           return callback()
@@ -37180,42 +37204,53 @@ class ByteParser extends Writable {
           this.#state = parserStates.INFO
         } else {
           if (!this.#info.compressed) {
-            this.#fragments.push(body)
+            this.writeFragments(body)
+
+            if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+              failWebsocketConnection(this.ws, new MessageSizeExceededError().message)
+              return
+            }
 
             // If the frame is not fragmented, a message has been received.
             // If the frame is fragmented, it will terminate with a fin bit set
             // and an opcode of 0 (continuation), therefore we handle that when
             // parsing continuation frames, not here.
             if (!this.#info.fragmented && this.#info.fin) {
-              const fullMessage = Buffer.concat(this.#fragments)
-              websocketMessageReceived(this.ws, this.#info.binaryType, fullMessage)
-              this.#fragments.length = 0
+              websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments())
             }
 
             this.#state = parserStates.INFO
           } else {
-            this.#extensions.get('permessage-deflate').decompress(body, this.#info.fin, (error, data) => {
-              if (error) {
-                failWebsocketConnection(this.ws, error.message)
-                return
-              }
+            this.#extensions.get('permessage-deflate').decompress(
+              body,
+              this.#info.fin,
+              (error, data) => {
+                if (error) {
+                  failWebsocketConnection(this.ws, error.message)
+                  return
+                }
 
-              this.#fragments.push(data)
+                this.writeFragments(data)
 
-              if (!this.#info.fin) {
-                this.#state = parserStates.INFO
+                if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+                  failWebsocketConnection(this.ws, new MessageSizeExceededError().message)
+                  return
+                }
+
+                if (!this.#info.fin) {
+                  this.#state = parserStates.INFO
+                  this.#loop = true
+                  this.run(callback)
+                  return
+                }
+
+                websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments())
+
                 this.#loop = true
+                this.#state = parserStates.INFO
                 this.run(callback)
-                return
               }
-
-              websocketMessageReceived(this.ws, this.#info.binaryType, Buffer.concat(this.#fragments))
-
-              this.#loop = true
-              this.#state = parserStates.INFO
-              this.#fragments.length = 0
-              this.run(callback)
-            })
+            )
 
             this.#loop = false
             break
@@ -37265,6 +37300,26 @@ class ByteParser extends Writable {
     this.#byteOffset -= n
 
     return buffer
+  }
+
+  writeFragments (fragment) {
+    this.#fragmentsBytes += fragment.length
+    this.#fragments.push(fragment)
+  }
+
+  consumeFragments () {
+    const fragments = this.#fragments
+
+    if (fragments.length === 1) {
+      this.#fragmentsBytes = 0
+      return fragments.shift()
+    }
+
+    const output = Buffer.concat(fragments, this.#fragmentsBytes)
+    this.#fragments = []
+    this.#fragmentsBytes = 0
+
+    return output
   }
 
   parseCloseBody (data) {
@@ -38298,7 +38353,11 @@ class WebSocket extends EventTarget {
     // once this happens, the connection is open
     this[kResponse] = response
 
-    const parser = new ByteParser(this, parsedExtensions)
+    const maxPayloadSize = this[kController]?.dispatcher?.webSocketOptions?.maxPayloadSize
+
+    const parser = new ByteParser(this, parsedExtensions, {
+      maxPayloadSize
+    })
     parser.on('drain', onParserDrain)
     parser.on('error', onParserError.bind(this))
 
@@ -53316,12 +53375,18 @@ function arrToStr(arr, options, indentation, matcher, stopNodeExpressions) {
             if (isPreviousElementTag) {
                 xmlStr += indentation;
             }
-            xmlStr += `<![CDATA[${tagObj[tagName][0][options.textNodeName]}]]>`;
+            const val = tagObj[tagName][0][options.textNodeName];
+            const safeVal = String(val).replace(/\]\]>/g, ']]]]><![CDATA[>');
+            xmlStr += `<![CDATA[${safeVal}]]>`;
             isPreviousElementTag = false;
             matcher.pop();
             continue;
         } else if (tagName === options.commentPropName) {
-            xmlStr += indentation + `<!--${tagObj[tagName][0][options.textNodeName]}-->`;
+            const val = tagObj[tagName][0][options.textNodeName]
+            const safeVal = String(val)
+                .replace(/--/g, '- -')   // -- is illegal anywhere in comment content
+                .replace(/-$/, '- ');    // trailing - would form -- with the closing -->
+            xmlStr += indentation + `<!--${safeVal}-->`;
             isPreviousElementTag = true;
             matcher.pop();
             continue;
@@ -53523,6 +53588,14 @@ function replaceEntitiesValue(textValue, options) {
         }
     }
     return textValue;
+}
+
+function cdataVal(val) {
+
+}
+
+function commentVal(val) {
+
 }
 ;// CONCATENATED MODULE: ./node_modules/fast-xml-builder/src/ignoreAttributes.js
 function getIgnoreAttributesFn(ignoreAttributes) {
@@ -54032,9 +54105,13 @@ function buildEmptyObjNode(val, key, attrStr, level) {
 
 Builder.prototype.buildTextValNode = function (val, key, attrStr, level, matcher) {
   if (this.options.cdataPropName !== false && key === this.options.cdataPropName) {
-    return this.indentate(level) + `<![CDATA[${val}]]>` + this.newLine;
+    const safeVal = String(val).replace(/\]\]>/g, ']]]]><![CDATA[>');
+    return this.indentate(level) + `<![CDATA[${safeVal}]]>` + this.newLine;
   } else if (this.options.commentPropName !== false && key === this.options.commentPropName) {
-    return this.indentate(level) + `<!--${val}-->` + this.newLine;
+    const safeVal = String(val)
+      .replace(/--/g, '- -')   // -- is illegal anywhere in comment content
+      .replace(/-$/, '- ');    // trailing - would form -- with the closing -->
+    return this.indentate(level) + `<!--${safeVal}-->` + this.newLine;
   } else if (key[0] === "?") {//PI tag
     return this.indentate(level) + '<' + key + attrStr + '?' + this.tagEndChar;
   } else {
@@ -54583,6 +54660,7 @@ const XMLValidator = {
 ;// CONCATENATED MODULE: ./node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
 
 
+
 const defaultOnDangerousProperty = (name) => {
   if (DANGEROUS_PROPERTY_NAMES.includes(name)) {
     return "__" + name;
@@ -54622,6 +54700,7 @@ const OptionsBuilder_defaultOptions = {
   unpairedTags: [],
   processEntities: true,
   htmlEntities: false,
+  entityDecoder: null,
   ignoreDeclaration: false,
   ignorePiTags: false,
   transformTagName: false,
@@ -54668,18 +54747,19 @@ function validatePropertyName(propertyName, optionName) {
  * @param {boolean|object} value 
  * @returns {object} Always returns normalized object
  */
-function normalizeProcessEntities(value) {
+function normalizeProcessEntities(value, htmlEntities) {
   // Boolean backward compatibility
   if (typeof value === 'boolean') {
     return {
       enabled: value, // true or false
       maxEntitySize: 10000,
-      maxExpansionDepth: 10,
-      maxTotalExpansions: 1000,
+      maxExpansionDepth: 10000,
+      maxTotalExpansions: Infinity,
       maxExpandedLength: 100000,
-      maxEntityCount: 100,
+      maxEntityCount: 1000,
       allowedTags: null,
-      tagFilter: null
+      tagFilter: null,
+      appliesTo: "all",
     };
   }
 
@@ -54693,7 +54773,8 @@ function normalizeProcessEntities(value) {
       maxExpandedLength: Math.max(1, value.maxExpandedLength ?? 100000),
       maxEntityCount: Math.max(1, value.maxEntityCount ?? 1000),
       allowedTags: value.allowedTags ?? null,
-      tagFilter: value.tagFilter ?? null
+      tagFilter: value.tagFilter ?? null,
+      appliesTo: value.appliesTo ?? "all",
     };
   }
 
@@ -54724,7 +54805,7 @@ const buildOptions = function (options) {
   }
 
   // Always normalize processEntities for backward compatibility and validation
-  built.processEntities = normalizeProcessEntities(built.processEntities);
+  built.processEntities = normalizeProcessEntities(built.processEntities, built.htmlEntities);
   built.unpairedTagsSet = new Set(built.unpairedTags);
   // Convert old-style stopNodes for backward compatibility
   if (built.stopNodes && Array.isArray(built.stopNodes)) {
@@ -54820,11 +54901,8 @@ class DocTypeReader {
                                 );
                             }
                             //const escaped = entityName.replace(/[.\-+*:]/g, '\\.');
-                            const escaped = entityName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                            entities[entityName] = {
-                                regx: RegExp(`&${escaped};`, "g"),
-                                val: val
-                            };
+                            //const escaped = entityName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            entities[entityName] = val;
                             entityCount++;
                         }
                     }
@@ -55585,9 +55663,1732 @@ class ExpressionSet {
   }
 }
 
+;// CONCATENATED MODULE: ./node_modules/@nodable/entities/src/entities.js
+// ---------------------------------------------------------------------------
+// Complete HTML5 named entity reference
+// Organized by logical categories for easy maintenance and selective importing
+// ---------------------------------------------------------------------------
+
+/**
+ * Basic Latin & Special Characters
+ * @type {Record<string, string>}
+ */
+const BASIC_LATIN = {
+  amp: '&',
+  AMP: '&',
+  lt: '<',
+  LT: '<',
+  gt: '>',
+  GT: '>',
+  quot: '"',
+  QUOT: '"',
+  apos: "'",
+  lsquo: '‘',
+  rsquo: '’',
+  ldquo: '“',
+  rdquo: '”',
+  lsquor: '‚',
+  rsquor: '’',
+  ldquor: '„',
+  bdquo: '„',
+  comma: ',',
+  period: '.',
+  colon: ':',
+  semi: ';',
+  excl: '!',
+  quest: '?',
+  num: '#',
+  dollar: '$',
+  percent: '%',
+  amp: '&',
+  ast: '*',
+  commat: '@',
+  lowbar: '_',
+  verbar: '|',
+  vert: '|',
+  sol: '/',
+  bsol: '\\',
+  lbrace: '{',
+  rbrace: '}',
+  lbrack: '[',
+  rbrack: ']',
+  lpar: '(',
+  rpar: ')',
+  nbsp: '\u00a0',
+  iexcl: '¡',
+  cent: '¢',
+  pound: '£',
+  curren: '¤',
+  yen: '¥',
+  brvbar: '¦',
+  sect: '§',
+  uml: '¨',
+  copy: '©',
+  COPY: '©',
+  ordf: 'ª',
+  laquo: '«',
+  not: '¬',
+  shy: '\u00ad',
+  reg: '®',
+  REG: '®',
+  macr: '¯',
+  deg: '°',
+  plusmn: '±',
+  sup2: '²',
+  sup3: '³',
+  acute: '´',
+  micro: 'µ',
+  para: '¶',
+  middot: '·',
+  cedil: '¸',
+  sup1: '¹',
+  ordm: 'º',
+  raquo: '»',
+  frac14: '¼',
+  frac12: '½',
+  half: '½',
+  frac34: '¾',
+  iquest: '¿',
+  times: '×',
+  div: '÷',
+  divide: '÷',
+};
+
+/**
+ * Latin Extended & Accented Letters (A-Z)
+ * @type {Record<string, string>}
+ */
+const LATIN_ACCENTS = {
+  Agrave: 'À',
+  agrave: 'à',
+  Aacute: 'Á',
+  aacute: 'á',
+  Acirc: 'Â',
+  acirc: 'â',
+  Atilde: 'Ã',
+  atilde: 'ã',
+  Auml: 'Ä',
+  auml: 'ä',
+  Aring: 'Å',
+  aring: 'å',
+  AElig: 'Æ',
+  aelig: 'æ',
+  Ccedil: 'Ç',
+  ccedil: 'ç',
+  Egrave: 'È',
+  egrave: 'è',
+  Eacute: 'É',
+  eacute: 'é',
+  Ecirc: 'Ê',
+  ecirc: 'ê',
+  Euml: 'Ë',
+  euml: 'ë',
+  Igrave: 'Ì',
+  igrave: 'ì',
+  Iacute: 'Í',
+  iacute: 'í',
+  Icirc: 'Î',
+  icirc: 'î',
+  Iuml: 'Ï',
+  iuml: 'ï',
+  ETH: 'Ð',
+  eth: 'ð',
+  Ntilde: 'Ñ',
+  ntilde: 'ñ',
+  Ograve: 'Ò',
+  ograve: 'ò',
+  Oacute: 'Ó',
+  oacute: 'ó',
+  Ocirc: 'Ô',
+  ocirc: 'ô',
+  Otilde: 'Õ',
+  otilde: 'õ',
+  Ouml: 'Ö',
+  ouml: 'ö',
+  Oslash: 'Ø',
+  oslash: 'ø',
+  Ugrave: 'Ù',
+  ugrave: 'ù',
+  Uacute: 'Ú',
+  uacute: 'ú',
+  Ucirc: 'Û',
+  ucirc: 'û',
+  Uuml: 'Ü',
+  uuml: 'ü',
+  Yacute: 'Ý',
+  yacute: 'ý',
+  THORN: 'Þ',
+  thorn: 'þ',
+  szlig: 'ß',
+  yuml: 'ÿ',
+  Yuml: 'Ÿ',
+};
+
+/**
+ * Latin Extended (Letters with diacritics)
+ * @type {Record<string, string>}
+ */
+const LATIN_EXTENDED = {
+  Amacr: 'Ā',
+  amacr: 'ā',
+  Abreve: 'Ă',
+  abreve: 'ă',
+  Aogon: 'Ą',
+  aogon: 'ą',
+  Cacute: 'Ć',
+  cacute: 'ć',
+  Ccirc: 'Ĉ',
+  ccirc: 'ĉ',
+  Cdot: 'Ċ',
+  cdot: 'ċ',
+  Ccaron: 'Č',
+  ccaron: 'č',
+  Dcaron: 'Ď',
+  dcaron: 'ď',
+  Dstrok: 'Đ',
+  dstrok: 'đ',
+  Emacr: 'Ē',
+  emacr: 'ē',
+  Ecaron: 'Ě',
+  ecaron: 'ě',
+  Edot: 'Ė',
+  edot: 'ė',
+  Eogon: 'Ę',
+  eogon: 'ę',
+  Gcirc: 'Ĝ',
+  gcirc: 'ĝ',
+  Gbreve: 'Ğ',
+  gbreve: 'ğ',
+  Gdot: 'Ġ',
+  gdot: 'ġ',
+  Gcedil: 'Ģ',
+  Hcirc: 'Ĥ',
+  hcirc: 'ĥ',
+  Hstrok: 'Ħ',
+  hstrok: 'ħ',
+  Itilde: 'Ĩ',
+  itilde: 'ĩ',
+  Imacr: 'Ī',
+  imacr: 'ī',
+  Iogon: 'Į',
+  iogon: 'į',
+  Idot: 'İ',
+  IJlig: 'Ĳ',
+  ijlig: 'ĳ',
+  Jcirc: 'Ĵ',
+  jcirc: 'ĵ',
+  Kcedil: 'Ķ',
+  kcedil: 'ķ',
+  kgreen: 'ĸ',
+  Lacute: 'Ĺ',
+  lacute: 'ĺ',
+  Lcedil: 'Ļ',
+  lcedil: 'ļ',
+  Lcaron: 'Ľ',
+  lcaron: 'ľ',
+  Lmidot: 'Ŀ',
+  lmidot: 'ŀ',
+  Lstrok: 'Ł',
+  lstrok: 'ł',
+  Nacute: 'Ń',
+  nacute: 'ń',
+  Ncaron: 'Ň',
+  ncaron: 'ň',
+  Ncedil: 'Ņ',
+  ncedil: 'ņ',
+  ENG: 'Ŋ',
+  eng: 'ŋ',
+  Omacr: 'Ō',
+  omacr: 'ō',
+  Odblac: 'Ő',
+  odblac: 'ő',
+  OElig: 'Œ',
+  oelig: 'œ',
+  Racute: 'Ŕ',
+  racute: 'ŕ',
+  Rcaron: 'Ř',
+  rcaron: 'ř',
+  Rcedil: 'Ŗ',
+  rcedil: 'ŗ',
+  Sacute: 'Ś',
+  sacute: 'ś',
+  Scirc: 'Ŝ',
+  scirc: 'ŝ',
+  Scedil: 'Ş',
+  scedil: 'ş',
+  Scaron: 'Š',
+  scaron: 'š',
+  Tcedil: 'Ţ',
+  tcedil: 'ţ',
+  Tcaron: 'Ť',
+  tcaron: 'ť',
+  Tstrok: 'Ŧ',
+  tstrok: 'ŧ',
+  Utilde: 'Ũ',
+  utilde: 'ũ',
+  Umacr: 'Ū',
+  umacr: 'ū',
+  Ubreve: 'Ŭ',
+  ubreve: 'ŭ',
+  Uring: 'Ů',
+  uring: 'ů',
+  Udblac: 'Ű',
+  udblac: 'ű',
+  Uogon: 'Ų',
+  uogon: 'ų',
+  Wcirc: 'Ŵ',
+  wcirc: 'ŵ',
+  Ycirc: 'Ŷ',
+  ycirc: 'ŷ',
+  Zacute: 'Ź',
+  zacute: 'ź',
+  Zdot: 'Ż',
+  zdot: 'ż',
+  Zcaron: 'Ž',
+  zcaron: 'ž',
+};
+
+/**
+ * Greek Letters
+ * @type {Record<string, string>}
+ */
+const GREEK = {
+  Alpha: 'Α',
+  alpha: 'α',
+  Beta: 'Β',
+  beta: 'β',
+  Gamma: 'Γ',
+  gamma: 'γ',
+  Delta: 'Δ',
+  delta: 'δ',
+  Epsilon: 'Ε',
+  epsilon: 'ε',
+  epsiv: 'ϵ',
+  varepsilon: 'ϵ',
+  Zeta: 'Ζ',
+  zeta: 'ζ',
+  Eta: 'Η',
+  eta: 'η',
+  Theta: 'Θ',
+  theta: 'θ',
+  thetasym: 'ϑ',
+  vartheta: 'ϑ',
+  Iota: 'Ι',
+  iota: 'ι',
+  Kappa: 'Κ',
+  kappa: 'κ',
+  kappav: 'ϰ',
+  varkappa: 'ϰ',
+  Lambda: 'Λ',
+  lambda: 'λ',
+  Mu: 'Μ',
+  mu: 'μ',
+  Nu: 'Ν',
+  nu: 'ν',
+  Xi: 'Ξ',
+  xi: 'ξ',
+  Omicron: 'Ο',
+  omicron: 'ο',
+  Pi: 'Π',
+  pi: 'π',
+  piv: 'ϖ',
+  varpi: 'ϖ',
+  Rho: 'Ρ',
+  rho: 'ρ',
+  rhov: 'ϱ',
+  varrho: 'ϱ',
+  Sigma: 'Σ',
+  sigma: 'σ',
+  sigmaf: 'ς',
+  sigmav: 'ς',
+  varsigma: 'ς',
+  Tau: 'Τ',
+  tau: 'τ',
+  Upsilon: 'Υ',
+  upsilon: 'υ',
+  upsi: 'υ',
+  Upsi: 'ϒ',
+  upsih: 'ϒ',
+  Phi: 'Φ',
+  phi: 'φ',
+  phiv: 'ϕ',
+  varphi: 'ϕ',
+  Chi: 'Χ',
+  chi: 'χ',
+  Psi: 'Ψ',
+  psi: 'ψ',
+  Omega: 'Ω',
+  omega: 'ω',
+  ohm: 'Ω',
+  Gammad: 'Ϝ',
+  gammad: 'ϝ',
+  digamma: 'ϝ',
+};
+
+/**
+ * Cyrillic Letters
+ * @type {Record<string, string>}
+ */
+const CYRILLIC = {
+  Afr: '𝔄',
+  afr: '𝔞',
+  Acy: 'А',
+  acy: 'а',
+  Bcy: 'Б',
+  bcy: 'б',
+  Vcy: 'В',
+  vcy: 'в',
+  Gcy: 'Г',
+  gcy: 'г',
+  Dcy: 'Д',
+  dcy: 'д',
+  IEcy: 'Е',
+  iecy: 'е',
+  IOcy: 'Ё',
+  iocy: 'ё',
+  ZHcy: 'Ж',
+  zhcy: 'ж',
+  Zcy: 'З',
+  zcy: 'з',
+  Icy: 'И',
+  icy: 'и',
+  Jcy: 'Й',
+  jcy: 'й',
+  Kcy: 'К',
+  kcy: 'к',
+  Lcy: 'Л',
+  lcy: 'л',
+  Mcy: 'М',
+  mcy: 'м',
+  Ncy: 'Н',
+  ncy: 'н',
+  Ocy: 'О',
+  ocy: 'о',
+  Pcy: 'П',
+  pcy: 'п',
+  Rcy: 'Р',
+  rcy: 'р',
+  Scy: 'С',
+  scy: 'с',
+  Tcy: 'Т',
+  tcy: 'т',
+  Ucy: 'У',
+  ucy: 'у',
+  Fcy: 'Ф',
+  fcy: 'ф',
+  KHcy: 'Х',
+  khcy: 'х',
+  TScy: 'Ц',
+  tscy: 'ц',
+  CHcy: 'Ч',
+  chcy: 'ч',
+  SHcy: 'Ш',
+  shcy: 'ш',
+  SHCHcy: 'Щ',
+  shchcy: 'щ',
+  HARDcy: 'Ъ',
+  hardcy: 'ъ',
+  Ycy: 'Ы',
+  ycy: 'ы',
+  SOFTcy: 'Ь',
+  softcy: 'ь',
+  Ecy: 'Э',
+  ecy: 'э',
+  YUcy: 'Ю',
+  yucy: 'ю',
+  YAcy: 'Я',
+  yacy: 'я',
+  DJcy: 'Ђ',
+  djcy: 'ђ',
+  GJcy: 'Ѓ',
+  gjcy: 'ѓ',
+  Jukcy: 'Є',
+  jukcy: 'є',
+  DScy: 'Ѕ',
+  dscy: 'ѕ',
+  Iukcy: 'І',
+  iukcy: 'і',
+  YIcy: 'Ї',
+  yicy: 'ї',
+  Jsercy: 'Ј',
+  jsercy: 'ј',
+  LJcy: 'Љ',
+  ljcy: 'љ',
+  NJcy: 'Њ',
+  njcy: 'њ',
+  TSHcy: 'Ћ',
+  tshcy: 'ћ',
+  KJcy: 'Ќ',
+  kjcy: 'ќ',
+  Ubrcy: 'Ў',
+  ubrcy: 'ў',
+  DZcy: 'Џ',
+  dzcy: 'џ',
+};
+
+/**
+ * Mathematical Operators & Relations
+ * @type {Record<string, string>}
+ */
+const MATH = {
+  plus: '+',
+  minus: '−',
+  mnplus: '∓',
+  mp: '∓',
+  pm: '±',
+  times: '×',
+  div: '÷',
+  divide: '÷',
+  sdot: '⋅',
+  star: '☆',
+  starf: '★',
+  bigstar: '★',
+  lowast: '∗',
+  ast: '*',
+  midast: '*',
+  compfn: '∘',
+  smallcircle: '∘',
+  bullet: '•',
+  bull: '•',
+  nbsp: '\u00a0',
+  hellip: '…',
+  mldr: '…',
+  prime: '′',
+  Prime: '″',
+  tprime: '‴',
+  bprime: '‵',
+  backprime: '‵',
+  minus: '−',
+  minusd: '∸',
+  dotminus: '∸',
+  plusdo: '∔',
+  dotplus: '∔',
+  plusmn: '±',
+  minusplus: '∓',
+  mnplus: '∓',
+  mp: '∓',
+  setminus: '∖',
+  smallsetminus: '∖',
+  Backslash: '∖',
+  setmn: '∖',
+  ssetmn: '∖',
+  lowbar: '_',
+  verbar: '|',
+  vert: '|',
+  VerticalLine: '|',
+  colon: ':',
+  Colon: '∷',
+  Proportion: '∷',
+  ratio: '∶',
+  equals: '=',
+  ne: '≠',
+  nequiv: '≢',
+  equiv: '≡',
+  Congruent: '≡',
+  sim: '∼',
+  thicksim: '∼',
+  thksim: '∼',
+  sime: '≃',
+  simeq: '≃',
+  TildeEqual: '≃',
+  asymp: '≈',
+  approx: '≈',
+  thickapprox: '≈',
+  thkap: '≈',
+  TildeTilde: '≈',
+  ncong: '≇',
+  cong: '≅',
+  TildeFullEqual: '≅',
+  asympeq: '≍',
+  CupCap: '≍',
+  bump: '≎',
+  Bumpeq: '≎',
+  HumpDownHump: '≎',
+  bumpe: '≏',
+  bumpeq: '≏',
+  HumpEqual: '≏',
+  dotminus: '∸',
+  minusd: '∸',
+  plusdo: '∔',
+  dotplus: '∔',
+  le: '≤',
+  LessEqual: '≤',
+  ge: '≥',
+  GreaterEqual: '≥',
+  lesseqgtr: '⋚',
+  lesseqqgtr: '⪋',
+  greater: '>',
+  less: '<',
+};
+
+/**
+ * Mathematical Operators (Advanced)
+ * @type {Record<string, string>}
+ */
+const MATH_ADVANCED = {
+  alefsym: 'ℵ',
+  aleph: 'ℵ',
+  beth: 'ℶ',
+  gimel: 'ℷ',
+  daleth: 'ℸ',
+  forall: '∀',
+  ForAll: '∀',
+  part: '∂',
+  PartialD: '∂',
+  exist: '∃',
+  Exists: '∃',
+  nexist: '∄',
+  nexists: '∄',
+  empty: '∅',
+  emptyset: '∅',
+  emptyv: '∅',
+  varnothing: '∅',
+  nabla: '∇',
+  Del: '∇',
+  isin: '∈',
+  isinv: '∈',
+  in: '∈',
+  Element: '∈',
+  notin: '∉',
+  notinva: '∉',
+  ni: '∋',
+  niv: '∋',
+  SuchThat: '∋',
+  ReverseElement: '∋',
+  notni: '∌',
+  notniva: '∌',
+  prod: '∏',
+  Product: '∏',
+  coprod: '∐',
+  Coproduct: '∐',
+  sum: '∑',
+  Sum: '∑',
+  minus: '−',
+  mp: '∓',
+  plusdo: '∔',
+  dotplus: '∔',
+  setminus: '∖',
+  lowast: '∗',
+  radic: '√',
+  Sqrt: '√',
+  prop: '∝',
+  propto: '∝',
+  Proportional: '∝',
+  varpropto: '∝',
+  infin: '∞',
+  infintie: '⧝',
+  ang: '∠',
+  angle: '∠',
+  angmsd: '∡',
+  measuredangle: '∡',
+  angsph: '∢',
+  mid: '∣',
+  VerticalBar: '∣',
+  nmid: '∤',
+  nsmid: '∤',
+  npar: '∦',
+  parallel: '∥',
+  spar: '∥',
+  nparallel: '∦',
+  nspar: '∦',
+  and: '∧',
+  wedge: '∧',
+  or: '∨',
+  vee: '∨',
+  cap: '∩',
+  cup: '∪',
+  int: '∫',
+  Integral: '∫',
+  conint: '∮',
+  ContourIntegral: '∮',
+  Conint: '∯',
+  DoubleContourIntegral: '∯',
+  Cconint: '∰',
+  there4: '∴',
+  therefore: '∴',
+  Therefore: '∴',
+  becaus: '∵',
+  because: '∵',
+  Because: '∵',
+  ratio: '∶',
+  Proportion: '∷',
+  minusd: '∸',
+  dotminus: '∸',
+  mDDot: '∺',
+  homtht: '∻',
+  sim: '∼',
+  bsimg: '∽',
+  backsim: '∽',
+  ac: '∾',
+  mstpos: '∾',
+  acd: '∿',
+  VerticalTilde: '≀',
+  wr: '≀',
+  wreath: '≀',
+  nsime: '≄',
+  nsimeq: '≄',
+  nsimeq: '≄',
+  ncong: '≇',
+  simne: '≆',
+  ncongdot: '⩭̸',
+  ngsim: '≵',
+  nsim: '≁',
+  napprox: '≉',
+  nap: '≉',
+  ngeq: '≱',
+  nge: '≱',
+  nleq: '≰',
+  nle: '≰',
+  ngtr: '≯',
+  ngt: '≯',
+  nless: '≮',
+  nlt: '≮',
+  nprec: '⊀',
+  npr: '⊀',
+  nsucc: '⊁',
+  nsc: '⊁',
+};
+
+/**
+ * Arrows
+ * @type {Record<string, string>}
+ */
+const ARROWS = {
+  larr: '←',
+  leftarrow: '←',
+  LeftArrow: '←',
+  uarr: '↑',
+  uparrow: '↑',
+  UpArrow: '↑',
+  rarr: '→',
+  rightarrow: '→',
+  RightArrow: '→',
+  darr: '↓',
+  downarrow: '↓',
+  DownArrow: '↓',
+  harr: '↔',
+  leftrightarrow: '↔',
+  LeftRightArrow: '↔',
+  varr: '↕',
+  updownarrow: '↕',
+  UpDownArrow: '↕',
+  nwarr: '↖',
+  nwarrow: '↖',
+  UpperLeftArrow: '↖',
+  nearr: '↗',
+  nearrow: '↗',
+  UpperRightArrow: '↗',
+  searr: '↘',
+  searrow: '↘',
+  LowerRightArrow: '↘',
+  swarr: '↙',
+  swarrow: '↙',
+  LowerLeftArrow: '↙',
+  lArr: '⇐',
+  Leftarrow: '⇐',
+  uArr: '⇑',
+  Uparrow: '⇑',
+  rArr: '⇒',
+  Rightarrow: '⇒',
+  dArr: '⇓',
+  Downarrow: '⇓',
+  hArr: '⇔',
+  Leftrightarrow: '⇔',
+  iff: '⇔',
+  vArr: '⇕',
+  Updownarrow: '⇕',
+  lAarr: '⇚',
+  Lleftarrow: '⇚',
+  rAarr: '⇛',
+  Rrightarrow: '⇛',
+  lrarr: '⇆',
+  leftrightarrows: '⇆',
+  rlarr: '⇄',
+  rightleftarrows: '⇄',
+  lrhar: '⇋',
+  leftrightharpoons: '⇋',
+  ReverseEquilibrium: '⇋',
+  rlhar: '⇌',
+  rightleftharpoons: '⇌',
+  Equilibrium: '⇌',
+  udarr: '⇅',
+  UpArrowDownArrow: '⇅',
+  duarr: '⇵',
+  DownArrowUpArrow: '⇵',
+  llarr: '⇇',
+  leftleftarrows: '⇇',
+  rrarr: '⇉',
+  rightrightarrows: '⇉',
+  ddarr: '⇊',
+  downdownarrows: '⇊',
+  har: '↽',
+  lhard: '↽',
+  leftharpoondown: '↽',
+  lharu: '↼',
+  leftharpoonup: '↼',
+  rhard: '⇁',
+  rightharpoondown: '⇁',
+  rharu: '⇀',
+  rightharpoonup: '⇀',
+  lsh: '↰',
+  Lsh: '↰',
+  rsh: '↱',
+  Rsh: '↱',
+  ldsh: '↲',
+  rdsh: '↳',
+  hookleftarrow: '↩',
+  hookrightarrow: '↪',
+  mapstoleft: '↤',
+  mapstoup: '↥',
+  map: '↦',
+  mapsto: '↦',
+  mapstodown: '↧',
+  crarr: '↵',
+  nwarrow: '↖',
+  nearrow: '↗',
+  searrow: '↘',
+  swarrow: '↙',
+  nleftarrow: '↚',
+  nleftrightarrow: '↮',
+  nrightarrow: '↛',
+  nrarr: '↛',
+  larrtl: '↢',
+  rarrtl: '↣',
+  leftarrowtail: '↢',
+  rightarrowtail: '↣',
+  twoheadleftarrow: '↞',
+  twoheadrightarrow: '↠',
+  Larr: '↞',
+  Rarr: '↠',
+  larrhk: '↩',
+  rarrhk: '↪',
+  larrlp: '↫',
+  looparrowleft: '↫',
+  rarrlp: '↬',
+  looparrowright: '↬',
+  harrw: '↭',
+  leftrightsquigarrow: '↭',
+  nrarrw: '↝̸',
+  rarrw: '↝',
+  rightsquigarrow: '↝',
+  larrbfs: '⤟',
+  rarrbfs: '⤠',
+  nvHarr: '⤄',
+  nvlArr: '⤂',
+  nvrArr: '⤃',
+  larrfs: '⤝',
+  rarrfs: '⤞',
+  Map: '⤅',
+  larrsim: '⥳',
+  rarrsim: '⥴',
+  harrcir: '⥈',
+  Uarrocir: '⥉',
+  lurdshar: '⥊',
+  ldrdhar: '⥧',
+  ldrushar: '⥋',
+  rdldhar: '⥩',
+  lrhard: '⥭',
+  rlhar: '⇌',
+  uharr: '↾',
+  uharl: '↿',
+  dharr: '⇂',
+  dharl: '⇃',
+  Uarr: '↟',
+  Darr: '↡',
+  zigrarr: '⇝',
+  nwArr: '⇖',
+  neArr: '⇗',
+  seArr: '⇘',
+  swArr: '⇙',
+  nharr: '↮',
+  nhArr: '⇎',
+  nlarr: '↚',
+  nlArr: '⇍',
+  nrarr: '↛',
+  nrArr: '⇏',
+  larrb: '⇤',
+  LeftArrowBar: '⇤',
+  rarrb: '⇥',
+  RightArrowBar: '⇥',
+};
+
+/**
+ * Geometric Shapes
+ * @type {Record<string, string>}
+ */
+const SHAPES = {
+  square: '□',
+  Square: '□',
+  squ: '□',
+  squf: '▪',
+  squarf: '▪',
+  blacksquar: '▪',
+  blacksquare: '▪',
+  FilledVerySmallSquare: '▪',
+  blk34: '▓',
+  blk12: '▒',
+  blk14: '░',
+  block: '█',
+  srect: '▭',
+  rect: '▭',
+  sdot: '⋅',
+  sdotb: '⊡',
+  dotsquare: '⊡',
+  triangle: '▵',
+  tri: '▵',
+  trine: '▵',
+  utri: '▵',
+  triangledown: '▿',
+  dtri: '▿',
+  tridown: '▿',
+  triangleleft: '◃',
+  ltri: '◃',
+  triangleright: '▹',
+  rtri: '▹',
+  blacktriangle: '▴',
+  utrif: '▴',
+  blacktriangledown: '▾',
+  dtrif: '▾',
+  blacktriangleleft: '◂',
+  ltrif: '◂',
+  blacktriangleright: '▸',
+  rtrif: '▸',
+  loz: '◊',
+  lozenge: '◊',
+  blacklozenge: '⧫',
+  lozf: '⧫',
+  bigcirc: '◯',
+  xcirc: '◯',
+  circ: 'ˆ',
+  Circle: '○',
+  cir: '○',
+  o: '○',
+  bullet: '•',
+  bull: '•',
+  hellip: '…',
+  mldr: '…',
+  nldr: '‥',
+  boxh: '─',
+  HorizontalLine: '─',
+  boxv: '│',
+  boxdr: '┌',
+  boxdl: '┐',
+  boxur: '└',
+  boxul: '┘',
+  boxvr: '├',
+  boxvl: '┤',
+  boxhd: '┬',
+  boxhu: '┴',
+  boxvh: '┼',
+  boxH: '═',
+  boxV: '║',
+  boxdR: '╒',
+  boxDr: '╓',
+  boxDR: '╔',
+  boxDl: '╕',
+  boxdL: '╖',
+  boxDL: '╗',
+  boxuR: '╘',
+  boxUr: '╙',
+  boxUR: '╚',
+  boxUl: '╜',
+  boxuL: '╛',
+  boxUL: '╝',
+  boxvR: '╞',
+  boxVr: '╟',
+  boxVR: '╠',
+  boxVl: '╢',
+  boxvL: '╡',
+  boxVL: '╣',
+  boxHd: '╤',
+  boxhD: '╥',
+  boxHD: '╦',
+  boxHu: '╧',
+  boxhU: '╨',
+  boxHU: '╩',
+  boxvH: '╪',
+  boxVh: '╫',
+  boxVH: '╬',
+};
+
+/**
+ * Punctuation & Diacritics
+ * @type {Record<string, string>}
+ */
+const PUNCTUATION = {
+  excl: '!',
+  iexcl: '¡',
+  brvbar: '¦',
+  sect: '§',
+  uml: '¨',
+  copy: '©',
+  ordf: 'ª',
+  laquo: '«',
+  not: '¬',
+  shy: '\u00ad',
+  reg: '®',
+  macr: '¯',
+  deg: '°',
+  plusmn: '±',
+  sup2: '²',
+  sup3: '³',
+  acute: '´',
+  micro: 'µ',
+  para: '¶',
+  middot: '·',
+  cedil: '¸',
+  sup1: '¹',
+  ordm: 'º',
+  raquo: '»',
+  frac14: '¼',
+  frac12: '½',
+  frac34: '¾',
+  iquest: '¿',
+  nbsp: '\u00a0',
+  comma: ',',
+  period: '.',
+  colon: ':',
+  semi: ';',
+  vert: '|',
+  Verbar: '‖',
+  verbar: '|',
+  dblac: '˝',
+  circ: 'ˆ',
+  caron: 'ˇ',
+  breve: '˘',
+  dot: '˙',
+  ring: '˚',
+  ogon: '˛',
+  tilde: '˜',
+  DiacriticalGrave: '`',
+  DiacriticalAcute: '´',
+  DiacriticalTilde: '˜',
+  DiacriticalDot: '˙',
+  DiacriticalDoubleAcute: '˝',
+  grave: '`',
+  acute: '´',
+};
+
+/**
+ * Currency Symbols
+ * @type {Record<string, string>}
+ */
+const CURRENCY = {
+  cent: '¢',
+  pound: '£',
+  curren: '¤',
+  yen: '¥',
+  euro: '€',
+  dollar: '$',
+  euro: '€',
+  fnof: 'ƒ',
+  inr: '₹',
+  af: '؋',
+  birr: 'ብር',
+  peso: '₱',
+  rub: '₽',
+  won: '₩',
+  yuan: '¥',
+  cedil: '¸',
+};
+
+/**
+ * Fractions
+ * @type {Record<string, string>}
+ */
+const FRACTIONS = {
+  frac12: '½',
+  half: '½',
+  frac13: '⅓',
+  frac14: '¼',
+  frac15: '⅕',
+  frac16: '⅙',
+  frac18: '⅛',
+  frac23: '⅔',
+  frac25: '⅖',
+  frac34: '¾',
+  frac35: '⅗',
+  frac38: '⅜',
+  frac45: '⅘',
+  frac56: '⅚',
+  frac58: '⅝',
+  frac78: '⅞',
+  frasl: '⁄',
+};
+
+/**
+ * Miscellaneous Symbols
+ * @type {Record<string, string>}
+ */
+const MISC_SYMBOLS = {
+  trade: '™',
+  TRADE: '™',
+  telrec: '⌕',
+  target: '⌖',
+  ulcorn: '⌜',
+  ulcorner: '⌜',
+  urcorn: '⌝',
+  urcorner: '⌝',
+  dlcorn: '⌞',
+  llcorner: '⌞',
+  drcorn: '⌟',
+  lrcorner: '⌟',
+  intercal: '⊺',
+  intcal: '⊺',
+  oplus: '⊕',
+  CirclePlus: '⊕',
+  ominus: '⊖',
+  CircleMinus: '⊖',
+  otimes: '⊗',
+  CircleTimes: '⊗',
+  osol: '⊘',
+  odot: '⊙',
+  CircleDot: '⊙',
+  oast: '⊛',
+  circledast: '⊛',
+  odash: '⊝',
+  circleddash: '⊝',
+  ocirc: '⊚',
+  circledcirc: '⊚',
+  boxplus: '⊞',
+  plusb: '⊞',
+  boxminus: '⊟',
+  minusb: '⊟',
+  boxtimes: '⊠',
+  timesb: '⊠',
+  boxdot: '⊡',
+  sdotb: '⊡',
+  veebar: '⊻',
+  vee: '∨',
+  barvee: '⊽',
+  and: '∧',
+  wedge: '∧',
+  Cap: '⋒',
+  Cup: '⋓',
+  Fork: '⋔',
+  pitchfork: '⋔',
+  epar: '⋕',
+  ltlarr: '⥶',
+  nvap: '≍⃒',
+  nvsim: '∼⃒',
+  nvge: '≥⃒',
+  nvle: '≤⃒',
+  nvlt: '<⃒',
+  nvgt: '>⃒',
+  nvltrie: '⊴⃒',
+  nvrtrie: '⊵⃒',
+  Vdash: '⊩',
+  dashv: '⊣',
+  vDash: '⊨',
+  Vdash: '⊩',
+  Vvdash: '⊪',
+  nvdash: '⊬',
+  nvDash: '⊭',
+  nVdash: '⊮',
+  nVDash: '⊯',
+};
+
+/**
+ * All entities combined (if you need everything)
+ * @type {Record<string, string>}
+ */
+const ALL_ENTITIES = {
+  ...BASIC_LATIN,
+  ...LATIN_ACCENTS,
+  ...LATIN_EXTENDED,
+  ...GREEK,
+  ...CYRILLIC,
+  ...MATH,
+  ...MATH_ADVANCED,
+  ...ARROWS,
+  ...SHAPES,
+  ...PUNCTUATION,
+  ...CURRENCY,
+  ...FRACTIONS,
+  ...MISC_SYMBOLS,
+};
+
+const XML = {
+  amp: "&",
+  apos: "'",
+  gt: ">",
+  lt: "<",
+  quot: "\""
+}
+const COMMON_HTML = {
+  nbsp: '\u00a0',
+  copy: '\u00a9',
+  reg: '\u00ae',
+  trade: '\u2122',
+  mdash: '\u2014',
+  ndash: '\u2013',
+  hellip: '\u2026',
+  laquo: '\u00ab',
+  raquo: '\u00bb',
+  lsquo: '\u2018',
+  rsquo: '\u2019',
+  ldquo: '\u201c',
+  rdquo: '\u201d',
+  bull: '\u2022',
+  para: '\u00b6',
+  sect: '\u00a7',
+  deg: '\u00b0',
+  frac12: '\u00bd',
+  frac14: '\u00bc',
+  frac34: '\u00be',
+}
+// ---------------------------------------------------------------------------
+// Note: NUMERIC_ENTITIES (&#NNN; / &#xHH;) are handled by the scanner directly
+// via String.fromCodePoint() without any map lookup.
+// ---------------------------------------------------------------------------
+;// CONCATENATED MODULE: ./node_modules/@nodable/entities/src/EntityDecoder.js
+// ---------------------------------------------------------------------------
+// Built-in named entity map  (name → replacement string)
+// No regex, no {regex,val} objects — just flat key/value pairs.
+// ---------------------------------------------------------------------------
+
+
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const SPECIAL_CHARS = new Set('!?\\\\/[]$%{}^&*()<>|+');
+
+/**
+ * Validate that an entity name contains no dangerous characters.
+ * @param {string} name
+ * @returns {string} the name, unchanged
+ * @throws {Error} on invalid characters
+ */
+function EntityDecoder_validateEntityName(name) {
+  if (name[0] === '#') {
+    throw new Error(`[EntityReplacer] Invalid character '#' in entity name: "${name}"`);
+  }
+  for (const ch of name) {
+    if (SPECIAL_CHARS.has(ch)) {
+      throw new Error(`[EntityReplacer] Invalid character '${ch}' in entity name: "${name}"`);
+    }
+  }
+  return name;
+}
+
+/**
+ * Merge one or more entity maps into a flat name→string map.
+ * Accepts either:
+ *   - plain string values:             { amp: '&' }
+ *   - legacy {regex,val} / {regx,val}: { lt: { regex: /.../, val: '<' } }
+ *
+ * Values containing '&' are skipped (recursive expansion risk).
+ *
+ * @param {...object} maps
+ * @returns {Record<string, string>}
+ */
+function mergeEntityMaps(...maps) {
+  const out = Object.create(null);
+  for (const map of maps) {
+    if (!map) continue;
+    for (const key of Object.keys(map)) {
+      const raw = map[key];
+      if (typeof raw === 'string') {
+        out[key] = raw;
+      } else if (raw && typeof raw === 'object' && raw.val !== undefined) {
+        // Legacy {regex,val} or {regx,val} — extract the string val only
+        const val = raw.val;
+        if (typeof val === 'string') {
+          out[key] = val;
+        }
+        // function vals are not supported in the scanner — skip
+      }
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// applyLimitsTo helpers
+// ---------------------------------------------------------------------------
+
+const LIMIT_TIER_EXTERNAL = 'external'; // input/runtime + persistent external maps
+const LIMIT_TIER_BASE = 'base';     // DEFAULT_XML_ENTITIES + namedEntities (system) maps
+const LIMIT_TIER_ALL = 'all';      // every entity regardless of tier
+
+/**
+ * Resolve `applyLimitsTo` option into a normalised Set of tier strings.
+ * Accepted values: 'external' | 'base' | 'all' | string[]
+ * Default: 'external' (only untrusted injected entities are counted).
+ * @param {string|string[]|undefined} raw
+ * @returns {Set<string>}
+ */
+function parseLimitTiers(raw) {
+  if (!raw || raw === LIMIT_TIER_EXTERNAL) return new Set([LIMIT_TIER_EXTERNAL]);
+  if (raw === LIMIT_TIER_ALL) return new Set([LIMIT_TIER_ALL]);
+  if (raw === LIMIT_TIER_BASE) return new Set([LIMIT_TIER_BASE]);
+  if (Array.isArray(raw)) return new Set(raw);
+  return new Set([LIMIT_TIER_EXTERNAL]); // safe default for unrecognised values
+}
+
+// ---------------------------------------------------------------------------
+// NCR (Numeric Character Reference) classification
+// ---------------------------------------------------------------------------
+
+// Severity order — higher number = stricter action.
+// Used to enforce minimum action levels for specific codepoint ranges.
+const NCR_LEVEL = Object.freeze({ allow: 0, leave: 1, remove: 2, throw: 3 });
+
+// XML 1.0 §2.2: allowed chars are #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+// Restricted C0: U+0001–U+001F excluding U+0009, U+000A, U+000D
+const XML10_ALLOWED_C0 = new Set([0x09, 0x0A, 0x0D]);
+
+/**
+ * Parse the `ncr` constructor option into flat, hot-path-friendly fields.
+ * @param {object|undefined} ncr
+ * @returns {{ xmlVersion: number, onLevel: number, nullLevel: number }}
+ */
+function parseNCRConfig(ncr) {
+  if (!ncr) {
+    return { xmlVersion: 1.0, onLevel: NCR_LEVEL.allow, nullLevel: NCR_LEVEL.remove };
+  }
+  const xmlVersion = ncr.xmlVersion === 1.1 ? 1.1 : 1.0;
+  const onLevel = NCR_LEVEL[ncr.onNCR] ?? NCR_LEVEL.allow;
+  const nullLevel = NCR_LEVEL[ncr.nullNCR] ?? NCR_LEVEL.remove;
+  // 'allow' is not meaningful for null — clamp to at least 'remove'
+  const clampedNull = Math.max(nullLevel, NCR_LEVEL.remove);
+  return { xmlVersion, onLevel, nullLevel: clampedNull };
+}
+
+// ---------------------------------------------------------------------------
+// EntityReplacer
+// ---------------------------------------------------------------------------
+
+/**
+ * Single-pass, zero-regex entity replacer for XML/HTML content.
+ *
+ * Algorithm: scan the string once for '&', read to ';', resolve via map
+ * or direct codepoint conversion, build output chunks, join once at the end.
+ *
+ * Entity lookup priority (highest → lowest):
+ *   1. input / runtime  (DOCTYPE entities for current document)
+ *   2. persistent external (survive across documents)
+ *   3. base named map   (DEFAULT_XML_ENTITIES + user-supplied namedEntities)
+ *
+ * Both input and external resolve as the 'external' tier for limit purposes.
+ * Base map entities resolve as the 'base' tier.
+ *
+ * Numeric / hex references (&#NNN; / &#xHH;) are resolved directly via
+ * String.fromCodePoint() — no map needed. They count as 'base' tier.
+ *
+ * @example
+ * const replacer = new EntityReplacer({ namedEntities: COMMON_HTML });
+ * replacer.setExternalEntities({ brand: 'Acme' });
+ *
+ * const instance = replacer.reset();
+ * instance.addInputEntities({ version: '1.0' });
+ * instance.encode('&brand; v&version; &lt;'); // 'Acme v1.0 <'
+ */
+class EntityDecoder {
+  /**
+   * @param {object} [options]
+   * @param {object|null}  [options.namedEntities]        — extra named entities merged into base map
+   * @param {object}  [options.limit]                 — security limits
+   * @param {number}       [options.limit.maxTotalExpansions=0]  — 0 = unlimited
+   * @param {number}       [options.limit.maxExpandedLength=0]   — 0 = unlimited
+   * @param {'external'|'base'|'all'|string[]} [options.limit.applyLimitsTo='external']
+   *   Which entity tiers count against the security limits:
+   *   - 'external' (default) — only input/runtime + persistent external entities
+   *   - 'base'               — only DEFAULT_XML_ENTITIES + namedEntities
+   *   - 'all'                — every entity regardless of tier
+   *   - string[]             — explicit combination, e.g. ['external', 'base']
+   * @param {((resolved: string, original: string) => string)|null} [options.postCheck=null]
+   * @param {string[]} [options.remove=[]] — entity names (e.g. ['nbsp', '#13']) to delete (replace with empty string)
+   * @param {string[]} [options.leave=[]]  — entity names to keep as literal (unchanged in output)
+   * @param {object}   [options.ncr]       — Numeric Character Reference controls
+   * @param {1.0|1.1}  [options.ncr.xmlVersion=1.0]
+   *   XML version governing which codepoint ranges are restricted:
+   *   - 1.0 — C0 controls U+0001–U+001F (except U+0009/000A/000D) are prohibited
+   *   - 1.1 — C0 controls are allowed when written as NCRs; C1 (U+007F–U+009F) decoded as-is
+   * @param {'allow'|'leave'|'remove'|'throw'} [options.ncr.onNCR='allow']
+   *   Base action for numeric references. Severity order: allow < leave < remove < throw.
+   *   For codepoint ranges that carry a minimum level (surrogates → remove, XML 1.0 C0 → remove),
+   *   the effective action is max(onNCR, rangeMinimum).
+   * @param {'remove'|'throw'} [options.ncr.nullNCR='remove']
+   *   Action for U+0000 (null). 'allow' and 'leave' are clamped to 'remove' since null is never safe.
+   */
+  constructor(options = {}) {
+    this._limit = options.limit || {};
+    this._maxTotalExpansions = this._limit.maxTotalExpansions || 0;
+    this._maxExpandedLength = this._limit.maxExpandedLength || 0;
+    this._postCheck = typeof options.postCheck === 'function' ? options.postCheck : r => r;
+    this._limitTiers = parseLimitTiers(this._limit.applyLimitsTo ?? LIMIT_TIER_EXTERNAL);
+    this._numericAllowed = options.numericAllowed ?? true;
+    // Base map: DEFAULT_XML_ENTITIES + user-supplied extras. Immutable after construction.
+    this._baseMap = mergeEntityMaps(XML, options.namedEntities || null);
+
+    // Persistent external entities — survive across documents.
+    // Stored as a separate map so reset() never touches them.
+    /** @type {Record<string, string>} */
+    this._externalMap = Object.create(null);
+
+    // Input / runtime entities — current document only, wiped on reset().
+    /** @type {Record<string, string>} */
+    this._inputMap = Object.create(null);
+
+    // Per-document counters
+    this._totalExpansions = 0;
+    this._expandedLength = 0;
+
+    // --- New: remove / leave sets ---
+    /** @type {Set<string>} */
+    this._removeSet = new Set(options.remove && Array.isArray(options.remove) ? options.remove : []);
+    /** @type {Set<string>} */
+    this._leaveSet = new Set(options.leave && Array.isArray(options.leave) ? options.leave : []);
+
+    // --- NCR config (parsed into flat fields for hot-path speed) ---
+    const ncrCfg = parseNCRConfig(options.ncr);
+    this._ncrXmlVersion = ncrCfg.xmlVersion;
+    this._ncrOnLevel = ncrCfg.onLevel;
+    this._ncrNullLevel = ncrCfg.nullLevel;
+  }
+
+  // -------------------------------------------------------------------------
+  // Persistent external entity registration
+  // -------------------------------------------------------------------------
+
+  /**
+   * Replace the full set of persistent external entities.
+   * All keys are validated — throws on invalid characters.
+   * @param {Record<string, string | { regex?: RegExp, val: string }>} map
+   */
+  setExternalEntities(map) {
+    if (map) {
+      for (const key of Object.keys(map)) {
+        EntityDecoder_validateEntityName(key);
+      }
+    }
+    this._externalMap = mergeEntityMaps(map);
+  }
+
+  /**
+   * Add a single persistent external entity.
+   * @param {string} key
+   * @param {string} value
+   */
+  addExternalEntity(key, value) {
+    EntityDecoder_validateEntityName(key);
+    if (typeof value === 'string' && value.indexOf('&') === -1) {
+      this._externalMap[key] = value;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Input / runtime entity registration (per document)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Inject DOCTYPE entities for the current document.
+   * Also resets per-document expansion counters.
+   * @param {Record<string, string | { regx?: RegExp, regex?: RegExp, val: string }>} map
+   */
+  addInputEntities(map) {
+    this._totalExpansions = 0;
+    this._expandedLength = 0;
+    this._inputMap = mergeEntityMaps(map);
+  }
+
+  // -------------------------------------------------------------------------
+  // Per-document reset
+  // -------------------------------------------------------------------------
+
+  /**
+   * Wipe input/runtime entities and reset counters.
+   * Call this before processing each new document.
+   * @returns {this}
+   */
+  reset() {
+    this._inputMap = Object.create(null);
+    this._totalExpansions = 0;
+    this._expandedLength = 0;
+    return this;
+  }
+
+  // -------------------------------------------------------------------------
+  // XML version (can be set after construction, e.g. once parser reads <?xml?>)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Update the XML version used for NCR classification.
+   * Call this as soon as the document's `<?xml version="...">` declaration is parsed.
+   * @param {1.0|1.1|number} version
+   */
+  setXmlVersion(version) {
+    this._ncrXmlVersion = version === 1.1 ? 1.1 : 1.0;
+  }
+
+  // -------------------------------------------------------------------------
+  // Primary API
+  // -------------------------------------------------------------------------
+
+  /**
+   * Replace all entity references in `str` in a single pass.
+   *
+   * @param {string} str
+   * @returns {string}
+   */
+  decode(str) {
+    if (typeof str !== 'string' || str.length === 0) return str;
+    //TODO: check if needed
+    //if (str.indexOf('&') === -1) return str; // fast path — no entities at all
+
+    const original = str;
+    const chunks = [];
+    const len = str.length;
+    let last = 0; // start of next unprocessed literal chunk
+    let i = 0;
+
+    const limitExpansions = this._maxTotalExpansions > 0;
+    const limitLength = this._maxExpandedLength > 0;
+    const checkLimits = limitExpansions || limitLength;
+
+    while (i < len) {
+      // Scan forward to next '&'
+      if (str.charCodeAt(i) !== 38 /* '&' */) { i++; continue; }
+
+      // --- Found '&' at position i ---
+
+      // Scan forward to ';'
+      let j = i + 1;
+      while (j < len && str.charCodeAt(j) !== 59 /* ';' */ && (j - i) <= 32) j++;
+
+      if (j >= len || str.charCodeAt(j) !== 59) {
+        // No closing ';' within window — treat '&' as literal
+        i++;
+        continue;
+      }
+
+      // Raw token between '&' and ';' (exclusive)
+      const token = str.slice(i + 1, j);
+      if (token.length === 0) { i++; continue; }
+
+      let replacement;
+      let tier; // which limit tier this entity belongs to
+
+      if (this._removeSet.has(token)) {
+        // Remove entity: replace with empty string
+        replacement = '';
+        // If entity was unknown (replacement undefined), we still need a tier for limits.
+        // Treat as external tier because it's user-directed removal of an unknown reference.
+        if (tier === undefined) {
+          tier = LIMIT_TIER_EXTERNAL;
+        }
+      } else if (this._leaveSet.has(token)) {
+        // Do not replace — keep original &token; as literal
+        i++;
+        continue;
+      } else if (token.charCodeAt(0) === 35 /* '#' */) {
+        // ---- Numeric / NCR reference ----
+        // NCR classification always runs first — prohibited codepoints must be
+        // caught regardless of numericAllowed.
+        const ncrResult = this._resolveNCR(token);
+        if (ncrResult === undefined) {
+          // 'leave' action — keep original &token; as-is
+          i++;
+          continue;
+        }
+        replacement = ncrResult; // '' for remove, char string for allow
+        tier = LIMIT_TIER_BASE;
+      } else {
+        // ---- Named reference ----
+        const resolved = this._resolveName(token);
+        replacement = resolved?.value;
+        tier = resolved?.tier;
+      }
+
+      if (replacement === undefined) {
+        // Unknown entity — leave as-is, advance past '&' only
+        i++;
+        continue;
+      }
+
+      // Flush literal chunk before this entity
+      if (i > last) chunks.push(str.slice(last, i));
+      chunks.push(replacement);
+      last = j + 1; // skip past ';'
+      i = last;
+
+      // Apply expansion limits only if this tier is being tracked
+      if (checkLimits && this._tierCounts(tier)) {
+        if (limitExpansions) {
+          this._totalExpansions++;
+          if (this._totalExpansions > this._maxTotalExpansions) {
+            throw new Error(
+              `[EntityReplacer] Entity expansion count limit exceeded: ` +
+              `${this._totalExpansions} > ${this._maxTotalExpansions}`
+            );
+          }
+        }
+        if (limitLength) {
+          // delta: replacement.length minus the raw &token; length (token.length + 2 for '&' and ';')
+          const delta = replacement.length - (token.length + 2);
+          if (delta > 0) {
+            this._expandedLength += delta;
+            if (this._expandedLength > this._maxExpandedLength) {
+              throw new Error(
+                `[EntityReplacer] Expanded content length limit exceeded: ` +
+                `${this._expandedLength} > ${this._maxExpandedLength}`
+              );
+            }
+          }
+        }
+      }
+    }
+
+    // Flush trailing literal
+    if (last < len) chunks.push(str.slice(last));
+
+    // If nothing was replaced, chunks is empty — return original
+    const result = chunks.length === 0 ? str : chunks.join('');
+
+    return this._postCheck(result, original);
+  }
+
+  // -------------------------------------------------------------------------
+  // Private: limit tier check
+  // -------------------------------------------------------------------------
+
+  /**
+   * Returns true if a resolved entity of the given tier should count
+   * against the expansion/length limits.
+   * @param {string} tier  — LIMIT_TIER_EXTERNAL | LIMIT_TIER_BASE
+   * @returns {boolean}
+   */
+  _tierCounts(tier) {
+    if (this._limitTiers.has(LIMIT_TIER_ALL)) return true;
+    return this._limitTiers.has(tier);
+  }
+
+  // -------------------------------------------------------------------------
+  // Private: entity resolution
+  // -------------------------------------------------------------------------
+
+  /**
+   * Resolve a named entity token (without & and ;).
+   * Priority: inputMap > externalMap > baseMap
+   * Returns the resolved value tagged with its limit tier.
+   *
+   * @param {string} name
+   * @returns {{ value: string, tier: string }|undefined}
+   */
+  _resolveName(name) {
+    // input and external both count as 'external' tier for limit purposes —
+    // they are injected at runtime and are the untrusted surface.
+    if (name in this._inputMap) return { value: this._inputMap[name], tier: LIMIT_TIER_EXTERNAL };
+    if (name in this._externalMap) return { value: this._externalMap[name], tier: LIMIT_TIER_EXTERNAL };
+    if (name in this._baseMap) return { value: this._baseMap[name], tier: LIMIT_TIER_BASE };
+    return undefined;
+  }
+
+  /**
+   * Classify a codepoint and return the minimum action level that must be applied.
+   * Returns -1 when no minimum is imposed (normal allow path).
+   *
+   * Ranges checked (in priority order):
+   *   1. U+0000            — null, governed by nullNCR (always ≥ remove)
+   *   2. U+D800–U+DFFF     — surrogates, always prohibited (min: remove)
+   *   3. U+0001–U+001F \ {0x09,0x0A,0x0D}  — XML 1.0 restricted C0 (min: remove)
+   *      (skipped in XML 1.1 — C0 controls are allowed when written as NCRs)
+   *
+   * @param {number} cp  — codepoint
+   * @returns {number}   — minimum NCR_LEVEL value, or -1 for no restriction
+   */
+  _classifyNCR(cp) {
+    // 1. Null
+    if (cp === 0) return this._ncrNullLevel;
+
+    // 2. Surrogates — always prohibited, minimum 'remove'
+    if (cp >= 0xD800 && cp <= 0xDFFF) return NCR_LEVEL.remove;
+
+    // 3. XML 1.0 restricted C0 controls
+    if (this._ncrXmlVersion === 1.0) {
+      if (cp >= 0x01 && cp <= 0x1F && !XML10_ALLOWED_C0.has(cp)) return NCR_LEVEL.remove;
+    }
+
+    return -1; // no restriction
+  }
+
+  /**
+   * Execute a resolved NCR action.
+   *
+   * @param {number} action   — NCR_LEVEL value
+   * @param {string} token    — raw token (e.g. '#38') for error messages
+   * @param {number} cp       — codepoint, used only for error messages
+   * @returns {string|undefined}
+   *   - decoded character string  → 'allow'
+   *   - ''                        → 'remove'
+   *   - undefined                 → 'leave' (caller must skip past '&' only)
+   *   - throws Error              → 'throw'
+   */
+  _applyNCRAction(action, token, cp) {
+    switch (action) {
+      case NCR_LEVEL.allow: return String.fromCodePoint(cp);
+      case NCR_LEVEL.remove: return '';
+      case NCR_LEVEL.leave: return undefined; // signal: keep literal
+      case NCR_LEVEL.throw:
+        throw new Error(
+          `[EntityDecoder] Prohibited numeric character reference ` +
+          `&${token}; (U+${cp.toString(16).toUpperCase().padStart(4, '0')})`
+        );
+      default: return String.fromCodePoint(cp);
+    }
+  }
+
+  /**
+   * Full NCR resolution pipeline for a numeric token.
+   *
+   * Steps:
+   *   1. Parse the codepoint (decimal or hex).
+   *   2. Validate the raw codepoint range (NaN, <0, >0x10FFFF).
+   *   3. If numericAllowed is false and no minimum restriction applies → leave as-is.
+   *   4. Classify the codepoint to find the minimum required action level.
+   *   5. Resolve effective action = max(onNCR, minimum).
+   *   6. Apply and return.
+   *
+   * @param {string} token  — e.g. '#38', '#x26', '#X26'
+   * @returns {string|undefined}
+   *   - string (incl. '')  — replacement ('' = remove)
+   *   - undefined          — leave original &token; as-is
+   */
+  _resolveNCR(token) {
+    // Step 1: parse codepoint
+    const second = token.charCodeAt(1);
+    let cp;
+    if (second === 120 /* x */ || second === 88 /* X */) {
+      cp = parseInt(token.slice(2), 16);
+    } else {
+      cp = parseInt(token.slice(1), 10);
+    }
+
+    // Step 2: out-of-range → leave as-is unconditionally
+    if (Number.isNaN(cp) || cp < 0 || cp > 0x10FFFF) return undefined;
+
+    // Step 3: classify to get minimum action level
+    const minimum = this._classifyNCR(cp);
+
+    // Step 4: if numericAllowed is false and no hard minimum → leave
+    if (!this._numericAllowed && minimum < NCR_LEVEL.remove) return undefined;
+
+    // Step 5: effective action = max(configured onNCR, range minimum)
+    const effective = minimum === -1
+      ? this._ncrOnLevel
+      : Math.max(this._ncrOnLevel, minimum);
+
+    // Step 6: apply
+    return this._applyNCRAction(effective, token, cp);
+  }
+}
 ;// CONCATENATED MODULE: ./node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
 
 ///@ts-check
+
 
 
 
@@ -55660,32 +57461,6 @@ class OrderedObjParser {
     this.options = options;
     this.currentNode = null;
     this.tagsNodeStack = [];
-    this.docTypeEntities = {};
-    this.lastEntities = {
-      "apos": { regex: /&(apos|#39|#x27);/g, val: "'" },
-      "gt": { regex: /&(gt|#62|#x3E);/g, val: ">" },
-      "lt": { regex: /&(lt|#60|#x3C);/g, val: "<" },
-      "quot": { regex: /&(quot|#34|#x22);/g, val: "\"" },
-    };
-    this.ampEntity = { regex: /&(amp|#38|#x26);/g, val: "&" };
-    this.htmlEntities = {
-      "space": { regex: /&(nbsp|#160);/g, val: " " },
-      // "lt" : { regex: /&(lt|#60);/g, val: "<" },
-      // "gt" : { regex: /&(gt|#62);/g, val: ">" },
-      // "amp" : { regex: /&(amp|#38);/g, val: "&" },
-      // "quot" : { regex: /&(quot|#34);/g, val: "\"" },
-      // "apos" : { regex: /&(apos|#39);/g, val: "'" },
-      "cent": { regex: /&(cent|#162);/g, val: "¢" },
-      "pound": { regex: /&(pound|#163);/g, val: "£" },
-      "yen": { regex: /&(yen|#165);/g, val: "¥" },
-      "euro": { regex: /&(euro|#8364);/g, val: "€" },
-      "copyright": { regex: /&(copy|#169);/g, val: "©" },
-      "reg": { regex: /&(reg|#174);/g, val: "®" },
-      "inr": { regex: /&(inr|#8377);/g, val: "₹" },
-      "num_dec": { regex: /&#([0-9]{1,7});/g, val: (_, str) => fromCodePoint(str, 10, "&#") },
-      "num_hex": { regex: /&#x([0-9a-fA-F]{1,6});/g, val: (_, str) => fromCodePoint(str, 16, "&#x") },
-    };
-    this.addExternalEntities = addExternalEntities;
     this.parseXml = parseXml;
     this.parseTextData = parseTextData;
     this.resolveNameSpace = resolveNameSpace;
@@ -55698,6 +57473,23 @@ class OrderedObjParser {
     this.ignoreAttributesFn = ignoreAttributes_getIgnoreAttributesFn(this.options.ignoreAttributes)
     this.entityExpansionCount = 0;
     this.currentExpandedLength = 0;
+    let namedEntities = { ...XML };
+    if (this.options.entityDecoder) {
+      this.entityDecoder = this.options.entityDecoder
+    } else {
+      if (typeof this.options.htmlEntities === "object") namedEntities = this.options.htmlEntities;
+      else if (this.options.htmlEntities === true) namedEntities = { ...COMMON_HTML, ...CURRENCY };
+      this.entityDecoder = new EntityDecoder({
+        namedEntities: namedEntities,
+        numericAllowed: this.options.htmlEntities,
+        limit: {
+          maxTotalExpansions: this.options.processEntities.maxTotalExpansions,
+          maxExpandedLength: this.options.processEntities.maxExpandedLength,
+          applyLimitsTo: this.options.processEntities.appliesTo,
+        }
+        //postCheck: resolved => resolved
+      });
+    }
 
     // Initialize path matcher for path-expression-matcher
     this.matcher = new Matcher();
@@ -55729,17 +57521,6 @@ class OrderedObjParser {
 
 }
 
-function addExternalEntities(externalEntities) {
-  const entKeys = Object.keys(externalEntities);
-  for (let i = 0; i < entKeys.length; i++) {
-    const ent = entKeys[i];
-    const escaped = ent.replace(/[.\-+*:]/g, '\\.');
-    this.lastEntities[ent] = {
-      regex: new RegExp("&" + escaped + ";", "g"),
-      val: externalEntities[ent]
-    }
-  }
-}
 
 /**
  * @param {string} val
@@ -55800,9 +57581,9 @@ function resolveNameSpace(tagname) {
 //const attrsRegx = new RegExp("([\\w\\-\\.\\:]+)\\s*=\\s*(['\"])((.|\n)*?)\\2","gm");
 const attrsRegx = new RegExp('([^\\s=]+)\\s*(=\\s*([\'"])([\\s\\S]*?)\\3)?', 'gm');
 
-function buildAttributesMap(attrStr, jPath, tagName) {
+function buildAttributesMap(attrStr, jPath, tagName, force = false) {
   const options = this.options;
-  if (options.ignoreAttributes !== true && typeof attrStr === 'string') {
+  if (force === true || (options.ignoreAttributes !== true && typeof attrStr === 'string')) {
     // attrStr = attrStr.replace(/\r?\n/g, ' ');
     //attrStr = attrStr || attrStr.trim();
 
@@ -55892,13 +57673,11 @@ const parseXml = function (xmlData) {
 
   // Reset matcher for new document
   this.matcher.reset();
+  this.entityDecoder.reset();
 
   // Reset entity expansion counters for this document
   this.entityExpansionCount = 0;
   this.currentExpandedLength = 0;
-  this.docTypeEntitiesKeys = [];
-  this.lastEntitiesKeys = Object.keys(this.lastEntities);
-  this.htmlEntitiesKeys = this.options.htmlEntities ? Object.keys(this.htmlEntities) : [];
   const options = this.options;
   const docTypeReader = new DocTypeReader(options.processEntities);
   const xmlLen = xmlData.length;
@@ -55948,6 +57727,11 @@ const parseXml = function (xmlData) {
         if (!tagData) throw new Error("Pi Tag is not closed.");
 
         textData = this.saveTextToParentTag(textData, currentNode, this.readonlyMatcher);
+        const attsMap = this.buildAttributesMap(tagData.tagExp, this.matcher, tagData.tagName, true);
+        if (attsMap) {
+          const ver = attsMap[this.options.attributeNamePrefix + "version"];
+          this.entityDecoder.setXmlVersion(Number(ver) || 1.0);
+        }
         if ((options.ignoreDeclaration && tagData.tagName === "?xml") || options.ignorePiTags) {
           //do nothing
         } else {
@@ -55955,8 +57739,8 @@ const parseXml = function (xmlData) {
           const childNode = new XmlNode(tagData.tagName);
           childNode.add(options.textNodeName, "");
 
-          if (tagData.tagName !== tagData.tagExp && tagData.attrExpPresent) {
-            childNode[":@"] = this.buildAttributesMap(tagData.tagExp, this.matcher, tagData.tagName);
+          if (tagData.tagName !== tagData.tagExp && tagData.attrExpPresent && options.ignoreAttributes !== true) {
+            childNode[":@"] = attsMap
           }
           this.addChild(currentNode, childNode, this.readonlyMatcher, i);
         }
@@ -55978,8 +57762,7 @@ const parseXml = function (xmlData) {
       } else if (c1 === 33
         && xmlData.charCodeAt(i + 2) === 68) { //'!D'
         const result = docTypeReader.readDocType(xmlData, i);
-        this.docTypeEntities = result.entities;
-        this.docTypeEntitiesKeys = Object.keys(this.docTypeEntities) || []
+        this.entityDecoder.addInputEntities(result.entities);
         i = result.i;
       } else if (c1 === 33
         && xmlData.charCodeAt(i + 2) === 91) { // '!['
@@ -56078,6 +57861,7 @@ const parseXml = function (xmlData) {
 
           if (prefixedAttrs) {
             // Extract raw attributes (without prefix) for our use
+            //TODO: seems a performance overhead
             rawAttrs = extractRawAttributes(prefixedAttrs, options);
           }
         }
@@ -56220,78 +58004,7 @@ function OrderedObjParser_replaceEntitiesValue(val, tagName, jPath) {
     }
   }
 
-  // Replace DOCTYPE entities
-  for (const entityName of this.docTypeEntitiesKeys) {
-    const entity = this.docTypeEntities[entityName];
-    const matches = val.match(entity.regx);
-
-    if (matches) {
-      // Track expansions
-      this.entityExpansionCount += matches.length;
-
-      // Check expansion limit
-      if (entityConfig.maxTotalExpansions &&
-        this.entityExpansionCount > entityConfig.maxTotalExpansions) {
-        throw new Error(
-          `Entity expansion limit exceeded: ${this.entityExpansionCount} > ${entityConfig.maxTotalExpansions}`
-        );
-      }
-
-      // Store length before replacement
-      const lengthBefore = val.length;
-      val = val.replace(entity.regx, entity.val);
-
-      // Check expanded length immediately after replacement
-      if (entityConfig.maxExpandedLength) {
-        this.currentExpandedLength += (val.length - lengthBefore);
-
-        if (this.currentExpandedLength > entityConfig.maxExpandedLength) {
-          throw new Error(
-            `Total expanded content size exceeded: ${this.currentExpandedLength} > ${entityConfig.maxExpandedLength}`
-          );
-        }
-      }
-    }
-  }
-  if (val.indexOf('&') === -1) return val;
-  // Replace standard entities
-  for (const entityName of this.lastEntitiesKeys) {
-    const entity = this.lastEntities[entityName];
-    const matches = val.match(entity.regex);
-    if (matches) {
-      this.entityExpansionCount += matches.length;
-      if (entityConfig.maxTotalExpansions &&
-        this.entityExpansionCount > entityConfig.maxTotalExpansions) {
-        throw new Error(
-          `Entity expansion limit exceeded: ${this.entityExpansionCount} > ${entityConfig.maxTotalExpansions}`
-        );
-      }
-    }
-    val = val.replace(entity.regex, entity.val);
-  }
-  if (val.indexOf('&') === -1) return val;
-
-  // Replace HTML entities if enabled
-  for (const entityName of this.htmlEntitiesKeys) {
-    const entity = this.htmlEntities[entityName];
-    const matches = val.match(entity.regex);
-    if (matches) {
-      //console.log(matches);
-      this.entityExpansionCount += matches.length;
-      if (entityConfig.maxTotalExpansions &&
-        this.entityExpansionCount > entityConfig.maxTotalExpansions) {
-        throw new Error(
-          `Entity expansion limit exceeded: ${this.entityExpansionCount} > ${entityConfig.maxTotalExpansions}`
-        );
-      }
-    }
-    val = val.replace(entity.regex, entity.val);
-  }
-
-  // Replace ampersand entity last
-  val = val.replace(this.ampEntity.regex, this.ampEntity.val);
-
-  return val;
+  return this.entityDecoder.decode(val);
 }
 
 
@@ -56717,7 +58430,7 @@ class XMLParser {
             }
         }
         const orderedObjParser = new OrderedObjParser(this.options);
-        orderedObjParser.addExternalEntities(this.externalEntities);
+        orderedObjParser.entityDecoder.setExternalEntities(this.externalEntities);
         const orderedResult = orderedObjParser.parseXml(xmlData);
         if (this.options.preserveOrder || orderedResult === undefined) return orderedResult;
         else return prettify(orderedResult, this.options, orderedObjParser.matcher, orderedObjParser.readonlyMatcher);
