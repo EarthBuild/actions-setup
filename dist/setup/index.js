@@ -57457,7 +57457,7 @@ function extractNamespace(rawTagName) {
 }
 
 class OrderedObjParser {
-  constructor(options) {
+  constructor(options, externalEntities) {
     this.options = options;
     this.currentNode = null;
     this.tagsNodeStack = [];
@@ -57480,7 +57480,7 @@ class OrderedObjParser {
       if (typeof this.options.htmlEntities === "object") namedEntities = this.options.htmlEntities;
       else if (this.options.htmlEntities === true) namedEntities = { ...COMMON_HTML, ...CURRENCY };
       this.entityDecoder = new EntityDecoder({
-        namedEntities: namedEntities,
+        namedEntities: { ...namedEntities, ...externalEntities },
         numericAllowed: this.options.htmlEntities,
         limit: {
           maxTotalExpansions: this.options.processEntities.maxTotalExpansions,
@@ -57657,7 +57657,7 @@ function buildAttributesMap(attrStr, jPath, tagName, force = false) {
 
     if (!hasAttrs) return;
 
-    if (options.attributesGroupName) {
+    if (options.attributesGroupName && !options.preserveOrder) {
       const attrCollection = {};
       attrCollection[options.attributesGroupName] = attrs;
       return attrCollection;
@@ -58043,11 +58043,15 @@ function isItStopNode() {
  * @returns 
  */
 function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
+  //TODO: ignore boolean attributes in tag expression
+  //TODO: if ignore attributes, dont read full attribute expression but the end. But read for xml declaration
   let attrBoundary = 0;
-  const chars = [];
   const len = xmlData.length;
   const closeCode0 = closingChar.charCodeAt(0);
   const closeCode1 = closingChar.length > 1 ? closingChar.charCodeAt(1) : -1;
+
+  let result = '';
+  let segmentStart = i;
 
   for (let index = i; index < len; index++) {
     const code = xmlData.charCodeAt(index);
@@ -58059,17 +58063,18 @@ function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
     } else if (code === closeCode0) {
       if (closeCode1 !== -1) {
         if (xmlData.charCodeAt(index + 1) === closeCode1) {
-          return { data: String.fromCharCode(...chars), index };
+          result += xmlData.substring(segmentStart, index);
+          return { data: result, index };
         }
       } else {
-        return { data: String.fromCharCode(...chars), index };
+        result += xmlData.substring(segmentStart, index);
+        return { data: result, index };
       }
-    } else if (code === 9) { // \t
-      chars.push(32); // space
-      continue;
+    } else if (code === 9 && !attrBoundary) { // \t - only replace with space outside attribute values
+      // Flush accumulated segment, add space, start new segment
+      result += xmlData.substring(segmentStart, index) + ' ';
+      segmentStart = index + 1;
     }
-
-    chars.push(code);
   }
 }
 
@@ -58429,8 +58434,8 @@ class XMLParser {
                 throw Error(`${result.err.msg}:${result.err.line}:${result.err.col}`)
             }
         }
-        const orderedObjParser = new OrderedObjParser(this.options);
-        orderedObjParser.entityDecoder.setExternalEntities(this.externalEntities);
+        const orderedObjParser = new OrderedObjParser(this.options, this.externalEntities);
+        // orderedObjParser.entityDecoder.setExternalEntities(this.externalEntities);
         const orderedResult = orderedObjParser.parseXml(xmlData);
         if (this.options.preserveOrder || orderedResult === undefined) return orderedResult;
         else return prettify(orderedResult, this.options, orderedObjParser.matcher, orderedObjParser.readonlyMatcher);
