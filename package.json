@@ -7,7 +7,9 @@
   "scripts": {
     "package": "ncc build -o dist/setup src/setup.ts --source-map --license LICENSE && ncc build -o dist/cache-save src/cache-save.ts --source-map --license LICENSE",
     "test": "vitest run --coverage src/**/*",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "postinstall": "npx @socketsecurity/socket-patch apply --silent --ecosystems npm",
+    "dependencies": "npx @socketsecurity/socket-patch apply --silent --ecosystems npm"
   },
   "type": "module",
   "repository": {
