@@ -1,10 +1,11 @@
-import fs from 'fs';
-
-import * as core from '@actions/core';
 import * as cache from '@actions/cache';
-
-import { State } from './constants';
+import * as core from '@actions/core';
+import * as exec from '@actions/exec';
+import fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as utils from './cache-utils';
+import { State } from './constants';
 
 // Catch and log any unhandled exceptions.  These exceptions can leak out of the uploadChunk method in
 // @actions/toolkit when a failed upload closes the file descriptor causing any in-process reads to
@@ -17,6 +18,7 @@ process.on('uncaughtException', (e) => {
 export async function run() {
   try {
     await cacheBinary();
+    await saveBuildkitCache();
   } catch (error: unknown) {
     if (error instanceof Error) {
       core.setFailed(error.message);
@@ -68,6 +70,57 @@ export const cacheBinary = async () => {
       }
     } else {
       core.error(`unknown error encountered: ${String(error)}`);
+      throw error;
+    }
+  }
+};
+
+export const saveBuildkitCache = async () => {
+  if (!utils.isCacheFeatureAvailable()) {
+    return;
+  }
+
+  const useBuildkitCache = core.getInput('experimental-buildkit-volume-cache') === 'true';
+  if (!useBuildkitCache) {
+    return;
+  }
+
+  const state = core.getState(State.BuildkitCacheMatchedKey);
+  const primaryKey = core.getInput('buildkit-cache-key');
+  const containerName = core.getInput('buildkit-container-name');
+  const volumeName = core.getInput('buildkit-volume-name');
+
+  if (primaryKey === state) {
+    core.info(
+      `Buildkit cache hit occurred on the primary key ${primaryKey}, not saving cache.`,
+    );
+    return;
+  }
+
+  try {
+    core.info(`Stopping buildkit container ${containerName}...`);
+    await exec.exec('docker', ['stop', containerName], { ignoreReturnCode: true });
+
+    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'earthbuild-cache-'));
+    const cacheFile = path.join(tempDir, 'earth-cache.tar.zst');
+    const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
+
+    core.info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
+    await exec.exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
+
+    await cache.saveCache([cacheFile], primaryKey);
+    core.info(`Buildkit cache saved with the key: ${primaryKey}`);
+  } catch (error: unknown) {
+    if (error instanceof Error) {
+      if (error.name === cache.ValidationError.name) {
+        throw error;
+      } else if (error.name === cache.ReserveCacheError.name) {
+        core.info(error.message);
+      } else {
+        core.warning(error.message);
+      }
+    } else {
+      core.error(`unknown error encountered saving buildkit cache: ${String(error)}`);
       throw error;
     }
   }

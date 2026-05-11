@@ -39007,6 +39007,18 @@ module.exports = JSON.parse('{"name":"@actions/cache","version":"6.0.0","descrip
 /******/ }
 /******/ 
 /************************************************************************/
+/******/ /* webpack/runtime/compat get default export */
+/******/ (() => {
+/******/ 	// getDefaultExport function for compatibility with non-harmony modules
+/******/ 	__nccwpck_require__.n = (module) => {
+/******/ 		var getter = module && module.__esModule ?
+/******/ 			() => (module['default']) :
+/******/ 			() => (module);
+/******/ 		__nccwpck_require__.d(getter, { a: getter });
+/******/ 		return getter;
+/******/ 	};
+/******/ })();
+/******/ 
 /******/ /* webpack/runtime/create fake namespace object */
 /******/ (() => {
 /******/ 	var getProto = Object.getPrototypeOf ? (obj) => (Object.getPrototypeOf(obj)) : (obj) => (obj.__proto__);
@@ -39261,6 +39273,7 @@ __nccwpck_require__.d(mappers_namespaceObject, {
 
 ;// CONCATENATED MODULE: external "node:fs/promises"
 const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs/promises");
+var promises_default = /*#__PURE__*/__nccwpck_require__.n(promises_namespaceObject);
 // EXTERNAL MODULE: external "os"
 var external_os_ = __nccwpck_require__(2037);
 // EXTERNAL MODULE: external "path"
@@ -89057,6 +89070,7 @@ var State;
     State["CachePrimaryKey"] = "EARTHBUILD_CACHE_KEY";
     State["CacheMatchedKey"] = "EARTHBUILD_CACHE_RESULT";
     State["BinaryPath"] = "EARTHBUILD_BINARY_PATH";
+    State["BuildkitCacheMatchedKey"] = "BUILDKIT_CACHE_RESULT";
 })(State || (State = {}));
 var Outputs;
 (function (Outputs) {
@@ -89088,6 +89102,10 @@ function isCacheFeatureAvailable() {
 
 
 
+
+
+
+
 const cache_restore_restoreCache = async (path, version) => {
     if (!isCacheFeatureAvailable()) {
         return false;
@@ -89107,6 +89125,40 @@ const cache_restore_restoreCache = async (path, version) => {
     saveState(State.CacheMatchedKey, cacheKey);
     info(`Cache restored from key: ${cacheKey}`);
     return Boolean(cacheKey);
+};
+const restoreBuildkitCache = async () => {
+    if (!isCacheFeatureAvailable()) {
+        return false;
+    }
+    const useBuildkitCache = getInput('experimental-buildkit-volume-cache') === 'true';
+    if (!useBuildkitCache) {
+        return false;
+    }
+    const cacheKeyInput = getInput('buildkit-cache-key');
+    const restoreKeysInput = getInput('buildkit-cache-restore-keys');
+    const volumeName = getInput('buildkit-volume-name');
+    const restoreKeys = restoreKeysInput ? restoreKeysInput.split('\n').map(k => k.trim()).filter(k => k) : [];
+    const tempDir = await promises_default().mkdtemp(external_path_.join(external_os_.tmpdir(), 'earthbuild-cache-'));
+    const cacheFile = external_path_.join(tempDir, 'earth-cache.tar.zst');
+    const cacheKey = await restoreCache([cacheFile], cacheKeyInput, restoreKeys);
+    if (!cacheKey) {
+        info('EarthBuild buildkit volume cache not found');
+        return false;
+    }
+    saveState(State.BuildkitCacheMatchedKey, cacheKey);
+    info(`Buildkit cache restored from key: ${cacheKey}`);
+    const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
+    info(`Extracting cache to ${volumePath}`);
+    await exec_exec('sudo', ['mkdir', '-p', volumePath]);
+    try {
+        await promises_default().access(cacheFile);
+        await exec_exec('sudo', ['tar', '-xf', cacheFile, '-C', volumePath]);
+        info('Buildkit cache successfully extracted');
+    }
+    catch (err) {
+        warning(`Failed to extract buildkit cache: ${String(err)}`);
+    }
+    return true;
 };
 
 ;// CONCATENATED MODULE: ./node_modules/universal-user-agent/index.js
@@ -90930,6 +90982,7 @@ async function run() {
         if (toolcacheDir) {
             addPath(toolcacheDir);
             info(`using earthbuild from toolcache (${toolcacheDir})`);
+            await restoreBuildkitCache();
             return;
         }
         // then try to restore earthbuild from the github action cache
@@ -90937,6 +90990,7 @@ async function run() {
         const restored = await cache_restore_restoreCache(installationPath, node_modules_semver.clean(tag_name) || tag_name.substring(1));
         if (restored) {
             await promises_namespaceObject.chmod(installationPath, 0o755);
+            await restoreBuildkitCache();
             return;
         }
         // finally, dowload EarthBuild release binary
@@ -90948,6 +91002,7 @@ async function run() {
         core_debug(`successfully downloaded ${buildURL} to ${downloaded}`);
         await promises_namespaceObject.chmod(installationPath, 0o755);
         await cacheDir(external_path_.join(destination, 'bin'), pkgName, node_modules_semver.clean(tag_name) || tag_name.substring(1), external_os_.arch());
+        await restoreBuildkitCache();
     }
     catch (error) {
         if (error instanceof Error) {

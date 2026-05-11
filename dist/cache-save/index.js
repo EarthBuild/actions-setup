@@ -38911,8 +38911,9 @@ var __webpack_exports__ = {};
 
 // EXPORTS
 __nccwpck_require__.d(__webpack_exports__, {
-  "$": () => (/* binding */ cacheBinary),
-  "K": () => (/* binding */ run)
+  "$H": () => (/* binding */ cacheBinary),
+  "KH": () => (/* binding */ run),
+  "bS": () => (/* binding */ saveBuildkitCache)
 });
 
 // NAMESPACE OBJECT: ./node_modules/@azure/storage-blob/dist/esm/generated/src/models/mappers.js
@@ -39105,6 +39106,8 @@ const external_fs_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta
 var external_fs_default = /*#__PURE__*/__nccwpck_require__.n(external_fs_namespaceObject);
 // EXTERNAL MODULE: external "os"
 var external_os_ = __nccwpck_require__(2037);
+// EXTERNAL MODULE: external "path"
+var external_path_ = __nccwpck_require__(1017);
 ;// CONCATENATED MODULE: ./node_modules/@actions/core/lib/utils.js
 // We use any as a valid input type
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -39270,8 +39273,6 @@ function file_command_prepareKeyValueMessage(key, value) {
     return `${key}<<${delimiter}${os.EOL}${convertedValue}${os.EOL}${delimiter}`;
 }
 //# sourceMappingURL=file-command.js.map
-// EXTERNAL MODULE: external "path"
-var external_path_ = __nccwpck_require__(1017);
 // EXTERNAL MODULE: external "http"
 var external_http_ = __nccwpck_require__(3685);
 var external_http_namespaceObject = /*#__PURE__*/__nccwpck_require__.t(external_http_, 2);
@@ -88108,6 +88109,7 @@ var State;
     State["CachePrimaryKey"] = "EARTHBUILD_CACHE_KEY";
     State["CacheMatchedKey"] = "EARTHBUILD_CACHE_RESULT";
     State["BinaryPath"] = "EARTHBUILD_BINARY_PATH";
+    State["BuildkitCacheMatchedKey"] = "BUILDKIT_CACHE_RESULT";
 })(State || (State = {}));
 var Outputs;
 (function (Outputs) {
@@ -88140,6 +88142,9 @@ function isCacheFeatureAvailable() {
 
 
 
+
+
+
 // Catch and log any unhandled exceptions.  These exceptions can leak out of the uploadChunk method in
 // @actions/toolkit when a failed upload closes the file descriptor causing any in-process reads to
 // throw an uncaught exception.  Instead of failing this action, just warn.
@@ -88150,6 +88155,7 @@ process.on('uncaughtException', (e) => {
 async function run() {
     try {
         await cacheBinary();
+        await saveBuildkitCache();
     }
     catch (error) {
         if (error instanceof Error) {
@@ -88201,12 +88207,58 @@ const cacheBinary = async () => {
         }
     }
 };
+const saveBuildkitCache = async () => {
+    if (!isCacheFeatureAvailable()) {
+        return;
+    }
+    const useBuildkitCache = getInput('experimental-buildkit-volume-cache') === 'true';
+    if (!useBuildkitCache) {
+        return;
+    }
+    const state = getState(State.BuildkitCacheMatchedKey);
+    const primaryKey = getInput('buildkit-cache-key');
+    const containerName = getInput('buildkit-container-name');
+    const volumeName = getInput('buildkit-volume-name');
+    if (primaryKey === state) {
+        info(`Buildkit cache hit occurred on the primary key ${primaryKey}, not saving cache.`);
+        return;
+    }
+    try {
+        info(`Stopping buildkit container ${containerName}...`);
+        await exec_exec('docker', ['stop', containerName], { ignoreReturnCode: true });
+        const tempDir = await external_fs_default().promises.mkdtemp(external_path_.join(external_os_.tmpdir(), 'earthbuild-cache-'));
+        const cacheFile = external_path_.join(tempDir, 'earth-cache.tar.zst');
+        const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
+        info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
+        await exec_exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
+        await cache_saveCache([cacheFile], primaryKey);
+        info(`Buildkit cache saved with the key: ${primaryKey}`);
+    }
+    catch (error) {
+        if (error instanceof Error) {
+            if (error.name === ValidationError.name) {
+                throw error;
+            }
+            else if (error.name === ReserveCacheError.name) {
+                info(error.message);
+            }
+            else {
+                warning(error.message);
+            }
+        }
+        else {
+            core_error(`unknown error encountered saving buildkit cache: ${String(error)}`);
+            throw error;
+        }
+    }
+};
 void run();
 
 })();
 
-var __webpack_exports__cacheBinary = __webpack_exports__.$;
-var __webpack_exports__run = __webpack_exports__.K;
-export { __webpack_exports__cacheBinary as cacheBinary, __webpack_exports__run as run };
+var __webpack_exports__cacheBinary = __webpack_exports__.$H;
+var __webpack_exports__run = __webpack_exports__.KH;
+var __webpack_exports__saveBuildkitCache = __webpack_exports__.bS;
+export { __webpack_exports__cacheBinary as cacheBinary, __webpack_exports__run as run, __webpack_exports__saveBuildkitCache as saveBuildkitCache };
 
 //# sourceMappingURL=index.js.map
