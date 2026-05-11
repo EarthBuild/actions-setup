@@ -102,14 +102,18 @@ export const saveBuildkitCache = async () => {
     await exec.exec('docker', ['stop', containerName], { ignoreReturnCode: true });
 
     const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'earthbuild-cache-'));
-    const cacheFile = path.join(tempDir, 'earth-cache.tar.zst');
-    const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
+    try {
+      const cacheFile = path.join(tempDir, 'earth-cache.tar.zst');
+      const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
 
-    core.info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
-    await exec.exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
+      core.info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
+      await exec.exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
 
-    await cache.saveCache([cacheFile], primaryKey);
-    core.info(`Buildkit cache saved with the key: ${primaryKey}`);
+      await cache.saveCache([cacheFile], primaryKey);
+      core.info(`Buildkit cache saved with the key: ${primaryKey}`);
+    } finally {
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
+    }
   } catch (error: unknown) {
     if (error instanceof Error) {
       if (error.name === cache.ValidationError.name) {

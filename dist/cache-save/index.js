@@ -39101,13 +39101,8 @@ __nccwpck_require__.d(mappers_namespaceObject, {
   "UserDelegationKey": () => (UserDelegationKey)
 });
 
-;// CONCATENATED MODULE: external "fs"
-const external_fs_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("fs");
-var external_fs_default = /*#__PURE__*/__nccwpck_require__.n(external_fs_namespaceObject);
 // EXTERNAL MODULE: external "os"
 var external_os_ = __nccwpck_require__(2037);
-// EXTERNAL MODULE: external "path"
-var external_path_ = __nccwpck_require__(1017);
 ;// CONCATENATED MODULE: ./node_modules/@actions/core/lib/utils.js
 // We use any as a valid input type
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -39238,6 +39233,9 @@ function escapeProperty(s) {
 //# sourceMappingURL=command.js.map
 ;// CONCATENATED MODULE: external "crypto"
 const external_crypto_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("crypto");
+;// CONCATENATED MODULE: external "fs"
+const external_fs_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("fs");
+var external_fs_default = /*#__PURE__*/__nccwpck_require__.n(external_fs_namespaceObject);
 ;// CONCATENATED MODULE: ./node_modules/@actions/core/lib/file-command.js
 // For internal use, subject to change.
 // We use any as a valid input type
@@ -39273,6 +39271,8 @@ function file_command_prepareKeyValueMessage(key, value) {
     return `${key}<<${delimiter}${os.EOL}${convertedValue}${os.EOL}${delimiter}`;
 }
 //# sourceMappingURL=file-command.js.map
+// EXTERNAL MODULE: external "path"
+var external_path_ = __nccwpck_require__(1017);
 // EXTERNAL MODULE: external "http"
 var external_http_ = __nccwpck_require__(3685);
 var external_http_namespaceObject = /*#__PURE__*/__nccwpck_require__.t(external_http_, 2);
@@ -88103,19 +88103,6 @@ function saveCacheV2(paths_1, key_1, options_1) {
     });
 }
 //# sourceMappingURL=cache.js.map
-;// CONCATENATED MODULE: ./src/constants.ts
-var State;
-(function (State) {
-    State["CachePrimaryKey"] = "EARTHBUILD_CACHE_KEY";
-    State["CacheMatchedKey"] = "EARTHBUILD_CACHE_RESULT";
-    State["BinaryPath"] = "EARTHBUILD_BINARY_PATH";
-    State["BuildkitCacheMatchedKey"] = "BUILDKIT_CACHE_RESULT";
-})(State || (State = {}));
-var Outputs;
-(function (Outputs) {
-    Outputs["CacheHit"] = "cache-hit";
-})(Outputs || (Outputs = {}));
-
 ;// CONCATENATED MODULE: ./src/cache-utils.ts
 
 
@@ -88135,6 +88122,19 @@ function isCacheFeatureAvailable() {
     }
     return true;
 }
+
+;// CONCATENATED MODULE: ./src/constants.ts
+var State;
+(function (State) {
+    State["CachePrimaryKey"] = "EARTHBUILD_CACHE_KEY";
+    State["CacheMatchedKey"] = "EARTHBUILD_CACHE_RESULT";
+    State["BinaryPath"] = "EARTHBUILD_BINARY_PATH";
+    State["BuildkitCacheMatchedKey"] = "BUILDKIT_CACHE_RESULT";
+})(State || (State = {}));
+var Outputs;
+(function (Outputs) {
+    Outputs["CacheHit"] = "cache-hit";
+})(Outputs || (Outputs = {}));
 
 ;// CONCATENATED MODULE: ./src/cache-save.ts
 
@@ -88227,12 +88227,17 @@ const saveBuildkitCache = async () => {
         info(`Stopping buildkit container ${containerName}...`);
         await exec_exec('docker', ['stop', containerName], { ignoreReturnCode: true });
         const tempDir = await external_fs_default().promises.mkdtemp(external_path_.join(external_os_.tmpdir(), 'earthbuild-cache-'));
-        const cacheFile = external_path_.join(tempDir, 'earth-cache.tar.zst');
-        const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
-        info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
-        await exec_exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
-        await cache_saveCache([cacheFile], primaryKey);
-        info(`Buildkit cache saved with the key: ${primaryKey}`);
+        try {
+            const cacheFile = external_path_.join(tempDir, 'earth-cache.tar.zst');
+            const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
+            info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
+            await exec_exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
+            await cache_saveCache([cacheFile], primaryKey);
+            info(`Buildkit cache saved with the key: ${primaryKey}`);
+        }
+        finally {
+            await external_fs_default().promises.rm(tempDir, { recursive: true, force: true });
+        }
     }
     catch (error) {
         if (error instanceof Error) {
