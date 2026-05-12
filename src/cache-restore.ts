@@ -48,11 +48,9 @@ export const restoreBuildkitCache = async (): Promise<boolean> => {
     return false;
   }
 
-  const cacheKeyInput = core.getInput('buildkit-cache-key');
-  const restoreKeysInput = core.getInput('buildkit-cache-restore-keys');
-  const volumeName = core.getInput('buildkit-volume-name');
-
-  const restoreKeys = restoreKeysInput ? restoreKeysInput.split('\n').map(k => k.trim()).filter(k => k) : [];
+  const cacheKeyInput = `earth-volume-cache-${process.env.GITHUB_SHA || 'unknown'}`;
+  const restoreKeys = ['earth-volume-cache-'];
+  const volumeName = 'earth-cache';
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'earthbuild-cache-'));
   try {

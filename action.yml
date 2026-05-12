@@ -19,18 +19,7 @@ inputs:
   experimental-buildkit-volume-cache:
     description: 'whether to use the experimental buildkit volume caching'
     default: 'false'
-  buildkit-cache-key:
-    description: 'Cache key for buildkit volume'
-    default: 'earth-volume-cache-${{ github.sha }}'
-  buildkit-cache-restore-keys:
-    description: 'Restore keys for buildkit volume'
-    default: 'earth-volume-cache-'
-  buildkit-container-name:
-    description: 'Name of the buildkit container to stop before caching'
-    default: 'earth-buildkitd'
-  buildkit-volume-name:
-    description: 'Name of the buildkit volume to cache'
-    default: 'earth-cache'
+
 runs:
   using: node24
   main: dist/setup/index.js

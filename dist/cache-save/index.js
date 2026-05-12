@@ -88216,9 +88216,9 @@ const saveBuildkitCache = async () => {
         return;
     }
     const state = getState(State.BuildkitCacheMatchedKey);
-    const primaryKey = getInput('buildkit-cache-key');
-    const containerName = getInput('buildkit-container-name');
-    const volumeName = getInput('buildkit-volume-name');
+    const primaryKey = `earth-volume-cache-${process.env.GITHUB_SHA || 'unknown'}`;
+    const containerName = process.env.EARTHLY_INSTALLATION_NAME || 'earth-buildkitd';
+    const volumeName = process.env.EARTHLY_INSTALLATION_NAME || 'earth-cache';
     if (primaryKey === state) {
         info(`Buildkit cache hit occurred on the primary key ${primaryKey}, not saving cache.`);
         return;

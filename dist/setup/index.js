@@ -89134,10 +89134,9 @@ const restoreBuildkitCache = async () => {
     if (!useBuildkitCache) {
         return false;
     }
-    const cacheKeyInput = getInput('buildkit-cache-key');
-    const restoreKeysInput = getInput('buildkit-cache-restore-keys');
-    const volumeName = getInput('buildkit-volume-name');
-    const restoreKeys = restoreKeysInput ? restoreKeysInput.split('\n').map(k => k.trim()).filter(k => k) : [];
+    const cacheKeyInput = `earth-volume-cache-${process.env.GITHUB_SHA || 'unknown'}`;
+    const restoreKeys = ['earth-volume-cache-'];
+    const volumeName = process.env.EARTHLY_INSTALLATION_NAME || 'earth-cache';
     const tempDir = await promises_default().mkdtemp(external_path_.join(external_os_.tmpdir(), 'earthbuild-cache-'));
     try {
         const cacheFile = external_path_.join(tempDir, 'earth-cache.tar.zst');
