@@ -101,18 +101,18 @@ export const saveBuildkitCache = async () => {
     core.info(`Stopping buildkit container ${containerName}...`);
     await exec.exec('docker', ['stop', containerName], { ignoreReturnCode: true });
 
-    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'earthbuild-cache-'));
+    const cacheFile = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'earthbuild-buildkit-cache.tar.zst');
     try {
-      const cacheFile = path.join(tempDir, 'earth-cache.tar.zst');
       const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
 
       core.info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
       await exec.exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
+      await exec.exec('sudo', ['chmod', '666', cacheFile]);
 
       await cache.saveCache([cacheFile], primaryKey);
       core.info(`Buildkit cache saved with the key: ${primaryKey}`);
     } finally {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
+      await fs.promises.rm(cacheFile, { force: true });
     }
   } catch (error: unknown) {
     if (error instanceof Error) {

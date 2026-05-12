@@ -88218,7 +88218,7 @@ const saveBuildkitCache = async () => {
     const state = getState(State.BuildkitCacheMatchedKey);
     const primaryKey = `earth-volume-cache-${process.env.GITHUB_SHA || 'unknown'}`;
     const containerName = process.env.EARTHLY_INSTALLATION_NAME || 'earth-buildkitd';
-    const volumeName = process.env.EARTHLY_INSTALLATION_NAME || 'earth-cache';
+    const volumeName = 'earth-cache';
     if (primaryKey === state) {
         info(`Buildkit cache hit occurred on the primary key ${primaryKey}, not saving cache.`);
         return;
@@ -88226,17 +88226,17 @@ const saveBuildkitCache = async () => {
     try {
         info(`Stopping buildkit container ${containerName}...`);
         await exec_exec('docker', ['stop', containerName], { ignoreReturnCode: true });
-        const tempDir = await external_fs_default().promises.mkdtemp(external_path_.join(external_os_.tmpdir(), 'earthbuild-cache-'));
+        const cacheFile = external_path_.join(process.env.RUNNER_TEMP || external_os_.tmpdir(), 'earthbuild-buildkit-cache.tar.zst');
         try {
-            const cacheFile = external_path_.join(tempDir, 'earth-cache.tar.zst');
             const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
             info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
             await exec_exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
+            await exec_exec('sudo', ['chmod', '666', cacheFile]);
             await cache_saveCache([cacheFile], primaryKey);
             info(`Buildkit cache saved with the key: ${primaryKey}`);
         }
         finally {
-            await external_fs_default().promises.rm(tempDir, { recursive: true, force: true });
+            await external_fs_default().promises.rm(cacheFile, { force: true });
         }
     }
     catch (error) {

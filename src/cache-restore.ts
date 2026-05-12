@@ -52,10 +52,8 @@ export const restoreBuildkitCache = async (): Promise<boolean> => {
   const restoreKeys = ['earth-volume-cache-'];
   const volumeName = 'earth-cache';
 
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'earthbuild-cache-'));
+  const cacheFile = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'earthbuild-buildkit-cache.tar.zst');
   try {
-    const cacheFile = path.join(tempDir, 'earth-cache.tar.zst');
-
     const cacheKey = await cache.restoreCache([cacheFile], cacheKeyInput, restoreKeys);
 
     if (!cacheKey) {
@@ -81,6 +79,6 @@ export const restoreBuildkitCache = async (): Promise<boolean> => {
 
     return true;
   } finally {
-    await fs.rm(tempDir, { recursive: true, force: true });
+    await fs.rm(cacheFile, { force: true });
   }
 };

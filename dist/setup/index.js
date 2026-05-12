@@ -89136,10 +89136,9 @@ const restoreBuildkitCache = async () => {
     }
     const cacheKeyInput = `earth-volume-cache-${process.env.GITHUB_SHA || 'unknown'}`;
     const restoreKeys = ['earth-volume-cache-'];
-    const volumeName = process.env.EARTHLY_INSTALLATION_NAME || 'earth-cache';
-    const tempDir = await promises_default().mkdtemp(external_path_.join(external_os_.tmpdir(), 'earthbuild-cache-'));
+    const volumeName = 'earth-cache';
+    const cacheFile = external_path_.join(process.env.RUNNER_TEMP || external_os_.tmpdir(), 'earthbuild-buildkit-cache.tar.zst');
     try {
-        const cacheFile = external_path_.join(tempDir, 'earth-cache.tar.zst');
         const cacheKey = await restoreCache([cacheFile], cacheKeyInput, restoreKeys);
         if (!cacheKey) {
             info('EarthBuild buildkit volume cache not found');
@@ -89161,7 +89160,7 @@ const restoreBuildkitCache = async () => {
         return true;
     }
     finally {
-        await promises_default().rm(tempDir, { recursive: true, force: true });
+        await promises_default().rm(cacheFile, { force: true });
     }
 };
 
