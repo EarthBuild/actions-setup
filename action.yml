@@ -16,21 +16,21 @@ inputs:
     default: 'true'
   github-token:
     description: 'GitHub token for fetching EarthBuild version list.'
-  # experimental-buildkit-volume-cache:
-  #   description: 'whether to use the experimental buildkit volume caching'
-  #   default: 'false'
-  # buildkit-cache-key:
-  #   description: 'Cache key for buildkit volume'
-  #   default: 'earthbuild-volume-cache-${{ github.sha }}'
-  # buildkit-cache-restore-keys:
-  #   description: 'Restore keys for buildkit volume'
-  #   default: 'earthbuild-volume-cache-'
-  # buildkit-container-name:
-  #   description: 'Name of the buildkit container to stop before caching'
-  #   default: 'earthly-buildkitd'
-  # buildkit-volume-name:
-  #   description: 'Name of the buildkit volume to cache'
-  #   default: 'earthly-cache'
+  experimental-buildkit-volume-cache:
+    description: 'whether to use the experimental buildkit volume caching'
+    default: 'false'
+  buildkit-cache-key:
+    description: 'Cache key for buildkit volume'
+    default: 'earthbuild-volume-cache-${{ github.sha }}'
+  buildkit-cache-restore-keys:
+    description: 'Restore keys for buildkit volume'
+    default: 'earthbuild-volume-cache-'
+  buildkit-container-name:
+    description: 'Name of the buildkit container to stop before caching'
+    default: 'earthly-buildkitd'
+  buildkit-volume-name:
+    description: 'Name of the buildkit volume to cache'
+    default: 'earthly-cache'
 runs:
   using: node24
   main: dist/setup/index.js
