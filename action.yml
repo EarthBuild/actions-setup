@@ -16,6 +16,10 @@ inputs:
     default: 'true'
   github-token:
     description: 'GitHub token for fetching EarthBuild version list.'
+  experimental-buildkit-volume-cache:
+    description: 'whether to use the experimental buildkit volume caching'
+    default: 'false'
+
 runs:
   using: node24
   main: dist/setup/index.js

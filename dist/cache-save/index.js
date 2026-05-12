@@ -38911,8 +38911,9 @@ var __webpack_exports__ = {};
 
 // EXPORTS
 __nccwpck_require__.d(__webpack_exports__, {
-  "$": () => (/* binding */ cacheBinary),
-  "K": () => (/* binding */ run)
+  "$H": () => (/* binding */ cacheBinary),
+  "KH": () => (/* binding */ run),
+  "bS": () => (/* binding */ saveBuildkitCache)
 });
 
 // NAMESPACE OBJECT: ./node_modules/@azure/storage-blob/dist/esm/generated/src/models/mappers.js
@@ -39100,9 +39101,6 @@ __nccwpck_require__.d(mappers_namespaceObject, {
   "UserDelegationKey": () => (UserDelegationKey)
 });
 
-;// CONCATENATED MODULE: external "fs"
-const external_fs_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("fs");
-var external_fs_default = /*#__PURE__*/__nccwpck_require__.n(external_fs_namespaceObject);
 // EXTERNAL MODULE: external "os"
 var external_os_ = __nccwpck_require__(2037);
 ;// CONCATENATED MODULE: ./node_modules/@actions/core/lib/utils.js
@@ -39235,6 +39233,9 @@ function escapeProperty(s) {
 //# sourceMappingURL=command.js.map
 ;// CONCATENATED MODULE: external "crypto"
 const external_crypto_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("crypto");
+;// CONCATENATED MODULE: external "fs"
+const external_fs_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("fs");
+var external_fs_default = /*#__PURE__*/__nccwpck_require__.n(external_fs_namespaceObject);
 ;// CONCATENATED MODULE: ./node_modules/@actions/core/lib/file-command.js
 // For internal use, subject to change.
 // We use any as a valid input type
@@ -88102,18 +88103,6 @@ function saveCacheV2(paths_1, key_1, options_1) {
     });
 }
 //# sourceMappingURL=cache.js.map
-;// CONCATENATED MODULE: ./src/constants.ts
-var State;
-(function (State) {
-    State["CachePrimaryKey"] = "EARTHBUILD_CACHE_KEY";
-    State["CacheMatchedKey"] = "EARTHBUILD_CACHE_RESULT";
-    State["BinaryPath"] = "EARTHBUILD_BINARY_PATH";
-})(State || (State = {}));
-var Outputs;
-(function (Outputs) {
-    Outputs["CacheHit"] = "cache-hit";
-})(Outputs || (Outputs = {}));
-
 ;// CONCATENATED MODULE: ./src/cache-utils.ts
 
 
@@ -88134,7 +88123,23 @@ function isCacheFeatureAvailable() {
     return true;
 }
 
+;// CONCATENATED MODULE: ./src/constants.ts
+var State;
+(function (State) {
+    State["CachePrimaryKey"] = "EARTHBUILD_CACHE_KEY";
+    State["CacheMatchedKey"] = "EARTHBUILD_CACHE_RESULT";
+    State["BinaryPath"] = "EARTHBUILD_BINARY_PATH";
+    State["BuildkitCacheMatchedKey"] = "BUILDKIT_CACHE_RESULT";
+})(State || (State = {}));
+var Outputs;
+(function (Outputs) {
+    Outputs["CacheHit"] = "cache-hit";
+})(Outputs || (Outputs = {}));
+
 ;// CONCATENATED MODULE: ./src/cache-save.ts
+
+
+
 
 
 
@@ -88150,6 +88155,7 @@ process.on('uncaughtException', (e) => {
 async function run() {
     try {
         await cacheBinary();
+        await saveBuildkitCache();
     }
     catch (error) {
         if (error instanceof Error) {
@@ -88201,12 +88207,63 @@ const cacheBinary = async () => {
         }
     }
 };
+const saveBuildkitCache = async () => {
+    if (!isCacheFeatureAvailable()) {
+        return;
+    }
+    const useBuildkitCache = getInput('experimental-buildkit-volume-cache') === 'true';
+    if (!useBuildkitCache) {
+        return;
+    }
+    const state = getState(State.BuildkitCacheMatchedKey);
+    const primaryKey = `earth-volume-cache-'}`;
+    const containerName = process.env.EARTHLY_INSTALLATION_NAME || 'earth-buildkitd';
+    const volumeName = 'earth-cache';
+    if (primaryKey === state) {
+        info(`Buildkit cache hit occurred on the primary key ${primaryKey}, not saving cache.`);
+        return;
+    }
+    try {
+        info(`Stopping buildkit container ${containerName}...`);
+        await exec_exec('docker', ['stop', containerName], { ignoreReturnCode: true });
+        const cacheFile = external_path_.join(process.env.RUNNER_TEMP || external_os_.tmpdir(), 'earthbuild-buildkit-cache.tar.zst');
+        try {
+            const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
+            info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
+            await exec_exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
+            await exec_exec('sudo', ['chmod', '666', cacheFile]);
+            await cache_saveCache([cacheFile], primaryKey);
+            info(`Buildkit cache saved with the key: ${primaryKey}`);
+        }
+        finally {
+            await external_fs_default().promises.rm(cacheFile, { force: true });
+        }
+    }
+    catch (error) {
+        if (error instanceof Error) {
+            if (error.name === ValidationError.name) {
+                throw error;
+            }
+            else if (error.name === ReserveCacheError.name) {
+                info(error.message);
+            }
+            else {
+                warning(error.message);
+            }
+        }
+        else {
+            core_error(`unknown error encountered saving buildkit cache: ${String(error)}`);
+            throw error;
+        }
+    }
+};
 void run();
 
 })();
 
-var __webpack_exports__cacheBinary = __webpack_exports__.$;
-var __webpack_exports__run = __webpack_exports__.K;
-export { __webpack_exports__cacheBinary as cacheBinary, __webpack_exports__run as run };
+var __webpack_exports__cacheBinary = __webpack_exports__.$H;
+var __webpack_exports__run = __webpack_exports__.KH;
+var __webpack_exports__saveBuildkitCache = __webpack_exports__.bS;
+export { __webpack_exports__cacheBinary as cacheBinary, __webpack_exports__run as run, __webpack_exports__saveBuildkitCache as saveBuildkitCache };
 
 //# sourceMappingURL=index.js.map
