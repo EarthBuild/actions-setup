@@ -86,7 +86,7 @@ export const saveBuildkitCache = async () => {
   }
 
   const state = core.getState(State.BuildkitCacheMatchedKey);
-  const primaryKey = `earth-volume-cache-${process.env.GITHUB_SHA || 'unknown'}`;
+  const primaryKey = `earth-volume-cache-'}`;
   const containerName = process.env.EARTHLY_INSTALLATION_NAME || 'earth-buildkitd';
   const volumeName = 'earth-cache';
 
