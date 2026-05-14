@@ -48,7 +48,7 @@ Install a specific version of earthbuild:
 
 ```yaml
 - name: Install earthbuild
-  uses: EarthBuild/actions-setup@e11e36ffea530484da8a4e5a4bd17d69de480786  #v2.0.0
+  uses: EarthBuild/actions-setup@e11e36ffea530484da8a4e5a4bd17d69de480786 #v2.0.0
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     version: 0.8.1
