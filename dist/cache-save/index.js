@@ -5394,7 +5394,7 @@ function expand(str, max, isTop) {
 
     N = [];
 
-    for (var i = x; test(i, y); i += incr) {
+    for (var i = x; test(i, y) && N.length < max; i += incr) {
       var c;
       if (isAlphaSequence) {
         c = String.fromCharCode(i);
@@ -15213,7 +15213,6 @@ function defaultFactory (origin, opts) {
 
 class Agent extends DispatcherBase {
   constructor ({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
-
     if (typeof factory !== 'function') {
       throw new InvalidArgumentError('factory must be a function.')
     }
@@ -15821,27 +15820,69 @@ class Parser {
 
       const offset = llhttp.llhttp_get_error_pos(this.ptr) - currentBufferPtr
 
-      if (ret === constants.ERROR.PAUSED_UPGRADE) {
-        this.onUpgrade(data.slice(offset))
-      } else if (ret === constants.ERROR.PAUSED) {
-        this.paused = true
-        socket.unshift(data.slice(offset))
-      } else if (ret !== constants.ERROR.OK) {
-        const ptr = llhttp.llhttp_get_error_reason(this.ptr)
-        let message = ''
-        /* istanbul ignore else: difficult to make a test case for */
-        if (ptr) {
-          const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0)
-          message =
-            'Response does not match the HTTP/1.1 protocol (' +
-            Buffer.from(llhttp.memory.buffer, ptr, len).toString() +
-            ')'
+      if (ret !== constants.ERROR.OK) {
+        const body = data.subarray(offset)
+
+        if (ret === constants.ERROR.PAUSED_UPGRADE) {
+          this.onUpgrade(body)
+        } else if (ret === constants.ERROR.PAUSED) {
+          this.paused = true
+          socket.unshift(body)
+        } else {
+          throw this.createError(ret, body)
         }
-        throw new HTTPParserError(message, constants.ERROR[ret], data.slice(offset))
       }
     } catch (err) {
       util.destroy(socket, err)
     }
+  }
+
+  finish () {
+    assert(currentParser === null)
+    assert(this.ptr != null)
+    assert(!this.paused)
+
+    const { llhttp } = this
+
+    let ret
+
+    try {
+      currentParser = this
+      ret = llhttp.llhttp_finish(this.ptr)
+    } finally {
+      currentParser = null
+    }
+
+    if (ret === constants.ERROR.OK) {
+      return null
+    }
+
+    if (ret === constants.ERROR.PAUSED || ret === constants.ERROR.PAUSED_UPGRADE) {
+      this.paused = true
+      return null
+    }
+
+    return this.createError(ret, EMPTY_BUF)
+  }
+
+  createError (ret, data) {
+    const { llhttp, contentLength, bytesRead } = this
+
+    if (contentLength && bytesRead !== parseInt(contentLength, 10)) {
+      return new ResponseContentLengthMismatchError()
+    }
+
+    const ptr = llhttp.llhttp_get_error_reason(this.ptr)
+    let message = ''
+    if (ptr) {
+      const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0)
+      message =
+        'Response does not match the HTTP/1.1 protocol (' +
+        Buffer.from(llhttp.memory.buffer, ptr, len).toString() +
+        ')'
+    }
+
+    return new HTTPParserError(message, constants.ERROR[ret], data)
   }
 
   destroy () {
@@ -16215,8 +16256,11 @@ async function connectH1 (client, socket) {
     // On Mac OS, we get an ECONNRESET even if there is a full body to be forwarded
     // to the user.
     if (err.code === 'ECONNRESET' && parser.statusCode && !parser.shouldKeepAlive) {
-      // We treat all incoming data so for as a valid response.
-      parser.onMessageComplete()
+      const parserErr = parser.finish()
+      if (parserErr) {
+        this[kError] = parserErr
+        this[kClient][kOnError](parserErr)
+      }
       return
     }
 
@@ -16235,8 +16279,10 @@ async function connectH1 (client, socket) {
     const parser = this[kParser]
 
     if (parser.statusCode && !parser.shouldKeepAlive) {
-      // We treat all incoming data so far as a valid response.
-      parser.onMessageComplete()
+      const parserErr = parser.finish()
+      if (parserErr) {
+        util.destroy(this, parserErr)
+      }
       return
     }
 
@@ -16248,8 +16294,7 @@ async function connectH1 (client, socket) {
 
     if (parser) {
       if (!this[kError] && parser.statusCode && !parser.shouldKeepAlive) {
-        // We treat all incoming data so far as a valid response.
-        parser.onMessageComplete()
+        this[kError] = parser.finish() || this[kError]
       }
 
       this[kParser].destroy()
@@ -55229,7 +55274,6 @@ const BASIC_LATIN = {
   num: '#',
   dollar: '$',
   percent: '%',
-  amp: '&',
   ast: '*',
   commat: '@',
   lowbar: '_',
@@ -55661,9 +55705,6 @@ const CYRILLIC = {
  */
 const MATH = {
   plus: '+',
-  minus: '−',
-  mnplus: '∓',
-  mp: '∓',
   pm: '±',
   times: '×',
   div: '÷',
@@ -55736,10 +55777,6 @@ const MATH = {
   bumpe: '≏',
   bumpeq: '≏',
   HumpEqual: '≏',
-  dotminus: '∸',
-  minusd: '∸',
-  plusdo: '∔',
-  dotplus: '∔',
   le: '≤',
   LessEqual: '≤',
   ge: '≥',
@@ -55855,7 +55892,6 @@ const MATH_ADVANCED = {
   wr: '≀',
   wreath: '≀',
   nsime: '≄',
-  nsimeq: '≄',
   nsimeq: '≄',
   ncong: '≇',
   simne: '≆',
@@ -55973,10 +56009,6 @@ const ARROWS = {
   mapsto: '↦',
   mapstodown: '↧',
   crarr: '↵',
-  nwarrow: '↖',
-  nearrow: '↗',
-  searrow: '↘',
-  swarrow: '↙',
   nleftarrow: '↚',
   nleftrightarrow: '↮',
   nrightarrow: '↛',
@@ -56017,7 +56049,6 @@ const ARROWS = {
   ldrushar: '⥋',
   rdldhar: '⥩',
   lrhard: '⥭',
-  rlhar: '⇌',
   uharr: '↾',
   uharl: '↿',
   dharr: '⇂',
@@ -56033,7 +56064,6 @@ const ARROWS = {
   nhArr: '⇎',
   nlarr: '↚',
   nlArr: '⇍',
-  nrarr: '↛',
   nrArr: '⇏',
   larrb: '⇤',
   LeftArrowBar: '⇤',
@@ -56195,7 +56225,6 @@ const PUNCTUATION = {
   DiacriticalDot: '˙',
   DiacriticalDoubleAcute: '˝',
   grave: '`',
-  acute: '´',
 };
 
 /**
@@ -56209,7 +56238,6 @@ const CURRENCY = {
   yen: '¥',
   euro: '€',
   dollar: '$',
-  euro: '€',
   fnof: 'ƒ',
   inr: '₹',
   af: '؋',
@@ -56309,7 +56337,6 @@ const MISC_SYMBOLS = {
   Vdash: '⊩',
   dashv: '⊣',
   vDash: '⊨',
-  Vdash: '⊩',
   Vvdash: '⊪',
   nvdash: '⊬',
   nvDash: '⊭',
@@ -56666,7 +56693,7 @@ class EntityDecoder {
   decode(str) {
     if (typeof str !== 'string' || str.length === 0) return str;
     //TODO: check if needed
-    //if (str.indexOf('&') === -1) return str; // fast path — no entities at all
+    if (str.indexOf('&') === -1) return str; // fast path — no entities at all
 
     const original = str;
     const chunks = [];
