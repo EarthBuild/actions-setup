@@ -5,8 +5,7 @@ import * as semver from 'semver';
 
 import * as core from '@actions/core';
 import * as tc from '@actions/tool-cache';
-
-import { restoreCache } from './cache-restore';
+import { restoreBuildkitCache, restoreCache } from './cache-restore';
 import { getVersionObject } from './lib/get-version';
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -82,6 +81,7 @@ async function run() {
     if (toolcacheDir) {
       core.addPath(toolcacheDir);
       core.info(`using earthbuild from toolcache (${toolcacheDir})`);
+      await restoreBuildkitCache();
       return;
     }
 
@@ -93,6 +93,7 @@ async function run() {
     );
     if (restored) {
       await fs.chmod(installationPath, 0o755);
+      await restoreBuildkitCache();
       return;
     }
 
@@ -117,6 +118,8 @@ async function run() {
       semver.clean(tag_name) || tag_name.substring(1),
       os.arch(),
     );
+
+    await restoreBuildkitCache();
   } catch (error: unknown) {
     if (error instanceof Error) {
       core.setFailed(error.message);
