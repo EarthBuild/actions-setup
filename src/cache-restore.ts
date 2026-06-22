@@ -43,7 +43,8 @@ export const restoreBuildkitCache = async (): Promise<boolean> => {
     return false;
   }
 
-  const useBuildkitCache = core.getInput('experimental-buildkit-volume-cache') === 'true';
+  const useBuildkitCache =
+    core.getInput('experimental-buildkit-volume-cache') === 'true';
   if (!useBuildkitCache) {
     return false;
   }
@@ -52,9 +53,16 @@ export const restoreBuildkitCache = async (): Promise<boolean> => {
   const restoreKeys = ['earth-volume-cache-'];
   const volumeName = 'earth-cache';
 
-  const cacheFile = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'earthbuild-buildkit-cache.tar.zst');
+  const cacheFile = path.join(
+    process.env.RUNNER_TEMP || os.tmpdir(),
+    'earthbuild-buildkit-cache.tar.zst',
+  );
   try {
-    const cacheKey = await cache.restoreCache([cacheFile], cacheKeyInput, restoreKeys);
+    const cacheKey = await cache.restoreCache(
+      [cacheFile],
+      cacheKeyInput,
+      restoreKeys,
+    );
 
     if (!cacheKey) {
       core.info('EarthBuild buildkit volume cache not found');

@@ -80,14 +80,16 @@ export const saveBuildkitCache = async () => {
     return;
   }
 
-  const useBuildkitCache = core.getInput('experimental-buildkit-volume-cache') === 'true';
+  const useBuildkitCache =
+    core.getInput('experimental-buildkit-volume-cache') === 'true';
   if (!useBuildkitCache) {
     return;
   }
 
   const state = core.getState(State.BuildkitCacheMatchedKey);
   const primaryKey = `earth-volume-cache-'}`;
-  const containerName = process.env.EARTHLY_INSTALLATION_NAME || 'earth-buildkitd';
+  const containerName =
+    process.env.EARTHLY_INSTALLATION_NAME || 'earth-buildkitd';
   const volumeName = 'earth-cache';
 
   if (primaryKey === state) {
@@ -99,14 +101,28 @@ export const saveBuildkitCache = async () => {
 
   try {
     core.info(`Stopping buildkit container ${containerName}...`);
-    await exec.exec('docker', ['stop', containerName], { ignoreReturnCode: true });
+    await exec.exec('docker', ['stop', containerName], {
+      ignoreReturnCode: true,
+    });
 
-    const cacheFile = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'earthbuild-buildkit-cache.tar.zst');
+    const cacheFile = path.join(
+      process.env.RUNNER_TEMP || os.tmpdir(),
+      'earthbuild-buildkit-cache.tar.zst',
+    );
     try {
       const volumePath = `/var/lib/docker/volumes/${volumeName}/_data`;
 
       core.info(`Compressing buildkit volume ${volumePath} to ${cacheFile}...`);
-      await exec.exec('sudo', ['tar', '-c', '--use-compress-program=zstd -T0', '-f', cacheFile, '-C', volumePath, '.']);
+      await exec.exec('sudo', [
+        'tar',
+        '-c',
+        '--use-compress-program=zstd -T0',
+        '-f',
+        cacheFile,
+        '-C',
+        volumePath,
+        '.',
+      ]);
       await exec.exec('sudo', ['chmod', '666', cacheFile]);
 
       await cache.saveCache([cacheFile], primaryKey);
@@ -124,7 +140,9 @@ export const saveBuildkitCache = async () => {
         core.warning(error.message);
       }
     } else {
-      core.error(`unknown error encountered saving buildkit cache: ${String(error)}`);
+      core.error(
+        `unknown error encountered saving buildkit cache: ${String(error)}`,
+      );
       throw error;
     }
   }
