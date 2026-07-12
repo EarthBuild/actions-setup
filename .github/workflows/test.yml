@@ -39,7 +39,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: '24.17.0'
+          node-version: '24.18.0'
       - uses: ./
       - run: earth --secret GITHUB_TOKEN +all
   # Below are tests specific to the github actions, which ensure the actions-setup code works with GHA
@@ -58,7 +58,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: '24.17.0'
+          node-version: '24.18.0'
       - run: npm install
       - run: npm run package
       - uses: ./
@@ -78,7 +78,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: '24.17.0'
+          node-version: '24.18.0'
       - run: npm install
       - run: npm run package
       - uses: ./
@@ -100,7 +100,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: '24.17.0'
+          node-version: '24.18.0'
       - run: npm install
       - run: npm run package
       - uses: ./
@@ -122,7 +122,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           cache: ${{ !env.ACT && 'npm' || '' }}
-          node-version: '24.17.0'
+          node-version: '24.18.0'
       - run: npm install
       - run: npm run package
       - uses: ./

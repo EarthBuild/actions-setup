@@ -4,9 +4,9 @@ ARG EARTHBUILD_LIB_VERSION=3.0.1
 IMPORT github.com/EarthBuild/lib/utils/git:$EARTHBUILD_LIB_VERSION AS git
 
 npm-base:
-    FROM node:24.16.0-alpine3.23@sha256:2bdb65ed1dab192432bc31c95f94155ca5ad7fc1392fb7eb7526ab682fa5bf14
+    FROM node:24.18.0-alpine3.23@sha256:595398b0081eacda8e1c4c5b97b76cd1020e4d58a8ebcb4843b9bca1e79e7436
     # renovate: datasource=npm packageName=npm
-    ENV npm_version=11.17.0
+    ENV npm_version=12.0.0
     RUN npm i -g npm@$npm_version
     WORKDIR /code
     COPY package.json package-lock.json .
