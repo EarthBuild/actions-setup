@@ -42981,20 +42981,20 @@ function extractZipNix(file, dest) {
  */
 function cacheDir(sourceDir, tool, version, arch) {
     return tool_cache_awaiter(this, void 0, void 0, function* () {
-        version = node_modules_semver.clean(version) || version;
-        arch = arch || external_os_.arch();
-        core_debug(`Caching tool ${tool} ${version} ${arch}`);
-        core_debug(`source dir: ${sourceDir}`);
-        if (!external_fs_namespaceObject.statSync(sourceDir).isDirectory()) {
+        version = semver.clean(version) || version;
+        arch = arch || os.arch();
+        core.debug(`Caching tool ${tool} ${version} ${arch}`);
+        core.debug(`source dir: ${sourceDir}`);
+        if (!fs.statSync(sourceDir).isDirectory()) {
             throw new Error('sourceDir is not a directory');
         }
         // Create the tool dir
         const destPath = yield _createToolPath(tool, version, arch);
         // copy each child item. do not move. move can fail on Windows
         // due to anti-virus software having an open handle on a file.
-        for (const itemName of external_fs_namespaceObject.readdirSync(sourceDir)) {
-            const s = external_path_.join(sourceDir, itemName);
-            yield io_cp(s, destPath, { recursive: true });
+        for (const itemName of fs.readdirSync(sourceDir)) {
+            const s = path.join(sourceDir, itemName);
+            yield io.cp(s, destPath, { recursive: true });
         }
         // write .complete
         _completeToolPath(tool, version, arch);
@@ -43013,20 +43013,20 @@ function cacheDir(sourceDir, tool, version, arch) {
  */
 function cacheFile(sourceFile, targetFile, tool, version, arch) {
     return tool_cache_awaiter(this, void 0, void 0, function* () {
-        version = semver.clean(version) || version;
-        arch = arch || os.arch();
-        core.debug(`Caching tool ${tool} ${version} ${arch}`);
-        core.debug(`source file: ${sourceFile}`);
-        if (!fs.statSync(sourceFile).isFile()) {
+        version = node_modules_semver.clean(version) || version;
+        arch = arch || external_os_.arch();
+        core_debug(`Caching tool ${tool} ${version} ${arch}`);
+        core_debug(`source file: ${sourceFile}`);
+        if (!external_fs_namespaceObject.statSync(sourceFile).isFile()) {
             throw new Error('sourceFile is not a file');
         }
         // create the tool dir
         const destFolder = yield _createToolPath(tool, version, arch);
         // copy instead of move. move can fail on Windows due to
         // anti-virus software having an open handle on a file.
-        const destPath = path.join(destFolder, targetFile);
-        core.debug(`destination file ${destPath}`);
-        yield io.cp(sourceFile, destPath);
+        const destPath = external_path_.join(destFolder, targetFile);
+        core_debug(`destination file ${destPath}`);
+        yield io_cp(sourceFile, destPath);
         // write .complete
         _completeToolPath(tool, version, arch);
         return destFolder;
@@ -97888,7 +97888,9 @@ async function run() {
         finally {
             await promises_namespaceObject.rm(tmpPath, { force: true });
         }
-        await cacheDir(external_path_.join(destination, 'bin'), pkgName, node_modules_semver.clean(tag_name) || tag_name.substring(1), external_os_.arch());
+        // cacheFile, not cacheDir: the shared bin dir may hold another job's
+        // in-flight *.tmp download, which cacheDir would copy into the toolcache.
+        await cacheFile(installationPath, `${pkgName}${setup_IS_WINDOWS ? '.exe' : ''}`, pkgName, node_modules_semver.clean(tag_name) || tag_name.substring(1), external_os_.arch());
     }
     catch (error) {
         if (error instanceof Error) {

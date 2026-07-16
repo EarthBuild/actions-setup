@@ -122,8 +122,11 @@ async function run() {
       await fs.rm(tmpPath, { force: true });
     }
 
-    await tc.cacheDir(
-      path.join(destination, 'bin'),
+    // cacheFile, not cacheDir: the shared bin dir may hold another job's
+    // in-flight *.tmp download, which cacheDir would copy into the toolcache.
+    await tc.cacheFile(
+      installationPath,
+      `${pkgName}${IS_WINDOWS ? '.exe' : ''}`,
       pkgName,
       semver.clean(tag_name) || tag_name.substring(1),
       os.arch(),
