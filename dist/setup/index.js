@@ -39487,6 +39487,8 @@ __nccwpck_require__.d(mappers_namespaceObject, {
   UserDelegationKey: () => (UserDelegationKey)
 });
 
+// EXTERNAL MODULE: external "node:crypto"
+var external_node_crypto_ = __nccwpck_require__(7598);
 ;// CONCATENATED MODULE: external "node:fs/promises"
 const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs/promises");
 // EXTERNAL MODULE: external "os"
@@ -48355,8 +48357,6 @@ function policies_formDataPolicy_formDataPolicy() {
     return formDataPolicy_formDataPolicy();
 }
 //# sourceMappingURL=formDataPolicy.js.map
-// EXTERNAL MODULE: external "node:crypto"
-var external_node_crypto_ = __nccwpck_require__(7598);
 ;// CONCATENATED MODULE: ./node_modules/@typespec/ts-http-runtime/dist/esm/util/sha256.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
@@ -97805,6 +97805,7 @@ function invariant(condition, message) {
 
 
 
+
 const setup_IS_WINDOWS = process.platform === 'win32';
 async function run() {
     try {
@@ -97868,13 +97869,25 @@ async function run() {
             return;
         }
         // finally, dowload EarthBuild release binary
-        await promises_namespaceObject.rm(installationDir, { recursive: true, force: true });
-        info(`Successfully deleted pre-existing ${installationDir}`);
+        await promises_namespaceObject.mkdir(installationDir, { recursive: true });
         const buildURL = `https://github.com/EarthBuild/earthbuild/releases/download/${tag_name}/${pkgName}-${releasePlatform}-${releaseArch}${setup_IS_WINDOWS ? '.exe' : ''}`;
         info(`downloading ${buildURL}`);
-        const downloaded = await downloadTool(buildURL, installationPath);
-        core_debug(`successfully downloaded ${buildURL} to ${downloaded}`);
-        await promises_namespaceObject.chmod(installationPath, 0o755);
+        // Download to a unique temp name and rename() into place. The install dir
+        // lives under $HOME, which self-hosted runners may share across instances;
+        // an in-place rewrite lets a concurrent job exec a half-written binary
+        // (ETXTBSY, exit 126) or hit a missing one after the old rm (exit 127).
+        // rename() is atomic on POSIX and replaces on Windows, so other jobs only
+        // ever see a complete, executable binary.
+        const tmpPath = `${installationPath}.${(0,external_node_crypto_.randomUUID)()}.tmp`;
+        try {
+            const downloaded = await downloadTool(buildURL, tmpPath);
+            core_debug(`successfully downloaded ${buildURL} to ${downloaded}`);
+            await promises_namespaceObject.chmod(tmpPath, 0o755);
+            await promises_namespaceObject.rename(tmpPath, installationPath);
+        }
+        finally {
+            await promises_namespaceObject.rm(tmpPath, { force: true });
+        }
         await cacheDir(external_path_.join(destination, 'bin'), pkgName, node_modules_semver.clean(tag_name) || tag_name.substring(1), external_os_.arch());
     }
     catch (error) {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'os';
 import * as path from 'path';
@@ -98,18 +99,28 @@ async function run() {
 
     // finally, dowload EarthBuild release binary
 
-    await fs.rm(installationDir, { recursive: true, force: true });
-    core.info(`Successfully deleted pre-existing ${installationDir}`);
+    await fs.mkdir(installationDir, { recursive: true });
 
     const buildURL = `https://github.com/EarthBuild/earthbuild/releases/download/${
       tag_name
     }/${pkgName}-${releasePlatform}-${releaseArch}${IS_WINDOWS ? '.exe' : ''}`;
 
     core.info(`downloading ${buildURL}`);
-    const downloaded = await tc.downloadTool(buildURL, installationPath);
-    core.debug(`successfully downloaded ${buildURL} to ${downloaded}`);
-
-    await fs.chmod(installationPath, 0o755);
+    // Download to a unique temp name and rename() into place. The install dir
+    // lives under $HOME, which self-hosted runners may share across instances;
+    // an in-place rewrite lets a concurrent job exec a half-written binary
+    // (ETXTBSY, exit 126) or hit a missing one after the old rm (exit 127).
+    // rename() is atomic on POSIX and replaces on Windows, so other jobs only
+    // ever see a complete, executable binary.
+    const tmpPath = `${installationPath}.${randomUUID()}.tmp`;
+    try {
+      const downloaded = await tc.downloadTool(buildURL, tmpPath);
+      core.debug(`successfully downloaded ${buildURL} to ${downloaded}`);
+      await fs.chmod(tmpPath, 0o755);
+      await fs.rename(tmpPath, installationPath);
+    } finally {
+      await fs.rm(tmpPath, { force: true });
+    }
 
     await tc.cacheDir(
       path.join(destination, 'bin'),
