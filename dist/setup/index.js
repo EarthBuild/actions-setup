@@ -39487,6 +39487,8 @@ __nccwpck_require__.d(mappers_namespaceObject, {
   UserDelegationKey: () => (UserDelegationKey)
 });
 
+// EXTERNAL MODULE: external "node:crypto"
+var external_node_crypto_ = __nccwpck_require__(7598);
 ;// CONCATENATED MODULE: external "node:fs/promises"
 const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs/promises");
 // EXTERNAL MODULE: external "os"
@@ -42979,20 +42981,20 @@ function extractZipNix(file, dest) {
  */
 function cacheDir(sourceDir, tool, version, arch) {
     return tool_cache_awaiter(this, void 0, void 0, function* () {
-        version = node_modules_semver.clean(version) || version;
-        arch = arch || external_os_.arch();
-        core_debug(`Caching tool ${tool} ${version} ${arch}`);
-        core_debug(`source dir: ${sourceDir}`);
-        if (!external_fs_namespaceObject.statSync(sourceDir).isDirectory()) {
+        version = semver.clean(version) || version;
+        arch = arch || os.arch();
+        core.debug(`Caching tool ${tool} ${version} ${arch}`);
+        core.debug(`source dir: ${sourceDir}`);
+        if (!fs.statSync(sourceDir).isDirectory()) {
             throw new Error('sourceDir is not a directory');
         }
         // Create the tool dir
         const destPath = yield _createToolPath(tool, version, arch);
         // copy each child item. do not move. move can fail on Windows
         // due to anti-virus software having an open handle on a file.
-        for (const itemName of external_fs_namespaceObject.readdirSync(sourceDir)) {
-            const s = external_path_.join(sourceDir, itemName);
-            yield io_cp(s, destPath, { recursive: true });
+        for (const itemName of fs.readdirSync(sourceDir)) {
+            const s = path.join(sourceDir, itemName);
+            yield io.cp(s, destPath, { recursive: true });
         }
         // write .complete
         _completeToolPath(tool, version, arch);
@@ -43011,20 +43013,20 @@ function cacheDir(sourceDir, tool, version, arch) {
  */
 function cacheFile(sourceFile, targetFile, tool, version, arch) {
     return tool_cache_awaiter(this, void 0, void 0, function* () {
-        version = semver.clean(version) || version;
-        arch = arch || os.arch();
-        core.debug(`Caching tool ${tool} ${version} ${arch}`);
-        core.debug(`source file: ${sourceFile}`);
-        if (!fs.statSync(sourceFile).isFile()) {
+        version = node_modules_semver.clean(version) || version;
+        arch = arch || external_os_.arch();
+        core_debug(`Caching tool ${tool} ${version} ${arch}`);
+        core_debug(`source file: ${sourceFile}`);
+        if (!external_fs_namespaceObject.statSync(sourceFile).isFile()) {
             throw new Error('sourceFile is not a file');
         }
         // create the tool dir
         const destFolder = yield _createToolPath(tool, version, arch);
         // copy instead of move. move can fail on Windows due to
         // anti-virus software having an open handle on a file.
-        const destPath = path.join(destFolder, targetFile);
-        core.debug(`destination file ${destPath}`);
-        yield io.cp(sourceFile, destPath);
+        const destPath = external_path_.join(destFolder, targetFile);
+        core_debug(`destination file ${destPath}`);
+        yield io_cp(sourceFile, destPath);
         // write .complete
         _completeToolPath(tool, version, arch);
         return destFolder;
@@ -48355,8 +48357,6 @@ function policies_formDataPolicy_formDataPolicy() {
     return formDataPolicy_formDataPolicy();
 }
 //# sourceMappingURL=formDataPolicy.js.map
-// EXTERNAL MODULE: external "node:crypto"
-var external_node_crypto_ = __nccwpck_require__(7598);
 ;// CONCATENATED MODULE: ./node_modules/@typespec/ts-http-runtime/dist/esm/util/sha256.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
@@ -97805,6 +97805,7 @@ function invariant(condition, message) {
 
 
 
+
 const setup_IS_WINDOWS = process.platform === 'win32';
 async function run() {
     try {
@@ -97868,14 +97869,28 @@ async function run() {
             return;
         }
         // finally, dowload EarthBuild release binary
-        await promises_namespaceObject.rm(installationDir, { recursive: true, force: true });
-        info(`Successfully deleted pre-existing ${installationDir}`);
+        await promises_namespaceObject.mkdir(installationDir, { recursive: true });
         const buildURL = `https://github.com/EarthBuild/earthbuild/releases/download/${tag_name}/${pkgName}-${releasePlatform}-${releaseArch}${setup_IS_WINDOWS ? '.exe' : ''}`;
         info(`downloading ${buildURL}`);
-        const downloaded = await downloadTool(buildURL, installationPath);
-        core_debug(`successfully downloaded ${buildURL} to ${downloaded}`);
-        await promises_namespaceObject.chmod(installationPath, 0o755);
-        await cacheDir(external_path_.join(destination, 'bin'), pkgName, node_modules_semver.clean(tag_name) || tag_name.substring(1), external_os_.arch());
+        // Download to a unique temp name and rename() into place. The install dir
+        // lives under $HOME, which self-hosted runners may share across instances;
+        // an in-place rewrite lets a concurrent job exec a half-written binary
+        // (ETXTBSY, exit 126) or hit a missing one after the old rm (exit 127).
+        // rename() is atomic on POSIX and replaces on Windows, so other jobs only
+        // ever see a complete, executable binary.
+        const tmpPath = `${installationPath}.${(0,external_node_crypto_.randomUUID)()}.tmp`;
+        try {
+            const downloaded = await downloadTool(buildURL, tmpPath);
+            core_debug(`successfully downloaded ${buildURL} to ${downloaded}`);
+            await promises_namespaceObject.chmod(tmpPath, 0o755);
+            await promises_namespaceObject.rename(tmpPath, installationPath);
+        }
+        finally {
+            await promises_namespaceObject.rm(tmpPath, { force: true });
+        }
+        // cacheFile, not cacheDir: the shared bin dir may hold another job's
+        // in-flight *.tmp download, which cacheDir would copy into the toolcache.
+        await cacheFile(installationPath, `${pkgName}${setup_IS_WINDOWS ? '.exe' : ''}`, pkgName, node_modules_semver.clean(tag_name) || tag_name.substring(1), external_os_.arch());
     }
     catch (error) {
         if (error instanceof Error) {
