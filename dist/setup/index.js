@@ -98234,7 +98234,6 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /orgs/{org}/personal-access-tokens",
   "GET /orgs/{org}/personal-access-tokens/{pat_id}/repositories",
   "GET /orgs/{org}/private-registries",
-  "GET /orgs/{org}/projects",
   "GET /orgs/{org}/projectsV2",
   "GET /orgs/{org}/projectsV2/{project_number}/fields",
   "GET /orgs/{org}/projectsV2/{project_number}/items",
@@ -98256,10 +98255,8 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/reactions",
   "GET /orgs/{org}/teams/{team_slug}/invitations",
   "GET /orgs/{org}/teams/{team_slug}/members",
-  "GET /orgs/{org}/teams/{team_slug}/projects",
   "GET /orgs/{org}/teams/{team_slug}/repos",
   "GET /orgs/{org}/teams/{team_slug}/teams",
-  "GET /projects/{project_id}/collaborators",
   "GET /repos/{owner}/{repo}/actions/artifacts",
   "GET /repos/{owner}/{repo}/actions/caches",
   "GET /repos/{owner}/{repo}/actions/organization-secrets",
@@ -98330,7 +98327,6 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /repos/{owner}/{repo}/milestones/{milestone_number}/labels",
   "GET /repos/{owner}/{repo}/notifications",
   "GET /repos/{owner}/{repo}/pages/builds",
-  "GET /repos/{owner}/{repo}/projects",
   "GET /repos/{owner}/{repo}/pulls",
   "GET /repos/{owner}/{repo}/pulls/comments",
   "GET /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions",
@@ -98368,7 +98364,6 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /teams/{team_id}/discussions/{discussion_number}/reactions",
   "GET /teams/{team_id}/invitations",
   "GET /teams/{team_id}/members",
-  "GET /teams/{team_id}/projects",
   "GET /teams/{team_id}/repos",
   "GET /teams/{team_id}/teams",
   "GET /user/blocks",
@@ -98410,7 +98405,6 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /users/{username}/keys",
   "GET /users/{username}/orgs",
   "GET /users/{username}/packages",
-  "GET /users/{username}/projects",
   "GET /users/{username}/projectsV2",
   "GET /users/{username}/projectsV2/{project_number}/fields",
   "GET /users/{username}/projectsV2/{project_number}/items",
@@ -98442,6 +98436,7 @@ function paginateRest(octokit) {
 }
 paginateRest.VERSION = plugin_paginate_rest_dist_bundle_VERSION;
 
+/* v8 ignore next -- @preserve */
 
 ;// CONCATENATED MODULE: ./src/lib/get-version.ts
 
