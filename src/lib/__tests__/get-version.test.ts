@@ -51,11 +51,12 @@ describe('get-version', () => {
     });
 
     it('invariant utility should assert condition', () => {
-      expect(() => invariant(false, 'failed condition')).toThrow(
-        'failed condition',
-      );
-      expect(() => invariant(true, 'should not throw')).not.toThrow();
+      expect(() => {
+        invariant(false, 'failed condition');
+      }).toThrow('failed condition');
+      expect(() => {
+        invariant(true, 'should not throw');
+      }).not.toThrow();
     });
   });
 });
-
