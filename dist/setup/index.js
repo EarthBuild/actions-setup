@@ -98443,44 +98443,29 @@ paginateRest.VERSION = plugin_paginate_rest_dist_bundle_VERSION;
 
 
 
+const OctokitWithPaginate = Octokit.plugin(paginateRest);
 async function getVersionObject(range, prerelease) {
-    const MyOctokit = Octokit.plugin(paginateRest);
-    const octokit = new MyOctokit({
+    const octokit = new OctokitWithPaginate({
         auth: getInput('github-token') || process.env.GITHUB_TOKEN || undefined,
     });
-    const versions = (await octokit.paginate('GET /repos/{owner}/{repo}/releases', {
+    const releases = await octokit.paginate('GET /repos/{owner}/{repo}/releases', {
         owner: 'EarthBuild',
         repo: 'earthbuild',
         per_page: 100,
-    }))
-        .filter((release) => {
-        // we expect each version to have at least 6 assets before it can be considered as latest available version
-        return (prerelease || !release.prerelease) && release.assets.length > 5;
-    })
+    });
+    const versions = releases
+        .filter((release) => (prerelease || !release.prerelease) && release.assets.length > 5)
         .reduce((acc, cur) => {
-        // remove 'v' from tag name
-        const tag = cur.tag_name.substring(1);
+        const tag = cur.tag_name.replace(/^v/, '');
         acc[tag] = cur;
         return acc;
     }, {});
-    if (range == 'latest') {
-        const latest = Object.keys(versions).reduce((prev, cur) => {
-            return (0,node_modules_semver.gte)(cur, prev) ? cur : prev;
-        });
-        invariant(latest, 'expect a latest version to exists');
-        const latestVersion = versions[latest];
-        invariant(latestVersion, `expect version ${latest} to exist`);
-        return latestVersion;
-    }
-    const resp = (0,node_modules_semver.maxSatisfying)(Object.keys(versions), range);
-    if (resp === null) {
+    const semverRange = range === 'latest' ? '*' : range;
+    const matchedVersionKey = (0,node_modules_semver.maxSatisfying)(Object.keys(versions), semverRange);
+    if (!matchedVersionKey || !versions[matchedVersionKey]) {
         throw new Error('Could not find a version that satisfied the version range');
     }
-    const ver = versions[resp];
-    if (!ver) {
-        throw new Error('Could not find a version that satisfied the version range');
-    }
-    return ver;
+    return versions[matchedVersionKey];
 }
 /* eslint @typescript-eslint/explicit-module-boundary-types: 0 */
 function invariant(condition, message) {
