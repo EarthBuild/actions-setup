@@ -98461,7 +98461,9 @@ async function getVersionObject(range, prerelease) {
         return acc;
     }, {});
     const semverRange = range === 'latest' ? '*' : range;
-    const matchedVersionKey = (0,node_modules_semver.maxSatisfying)(Object.keys(versions), semverRange);
+    const matchedVersionKey = (0,node_modules_semver.maxSatisfying)(Object.keys(versions), semverRange, {
+        includePrerelease: prerelease,
+    });
     if (!matchedVersionKey || !versions[matchedVersionKey]) {
         throw new Error('Could not find a version that satisfied the version range');
     }

@@ -39,7 +39,9 @@ export async function getVersionObject(
     }, {});
 
   const semverRange = range === 'latest' ? '*' : range;
-  const matchedVersionKey = maxSatisfying(Object.keys(versions), semverRange);
+  const matchedVersionKey = maxSatisfying(Object.keys(versions), semverRange, {
+    includePrerelease: prerelease,
+  });
 
   if (!matchedVersionKey || !versions[matchedVersionKey]) {
     throw new Error(

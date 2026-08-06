@@ -39,6 +39,11 @@ describe('get-version', () => {
     });
   });
   describe('error handling & invariants', () => {
+    it('should support prerelease versions when prerelease flag is true', async () => {
+      const v = await getVersionObject('latest', true);
+      expect(semver.gte(v.tag_name, latest)).toBe(true);
+    });
+
     it('should throw an error when no version satisfies the range', async () => {
       await expect(getVersionObject('999.0.0', false)).rejects.toThrow(
         'Could not find a version that satisfied the version range',
