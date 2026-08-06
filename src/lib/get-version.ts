@@ -1,8 +1,8 @@
+import * as core from '@actions/core';
 import { Octokit } from '@octokit/core';
+import { paginateRest } from '@octokit/plugin-paginate-rest';
 import { Endpoints } from '@octokit/types';
 import { maxSatisfying } from 'semver';
-import { paginateRest } from '@octokit/plugin-paginate-rest';
-import * as core from '@actions/core';
 
 export type ReleaseResponse =
   Endpoints['GET /repos/{owner}/{repo}/releases']['response']['data'][0];
@@ -11,7 +11,7 @@ const OctokitWithPaginate = Octokit.plugin(paginateRest);
 
 export async function getVersionObject(
   range: string,
-  prerelease: boolean,
+  includePrerelease: boolean,
 ): Promise<ReleaseResponse> {
   const octokit = new OctokitWithPaginate({
     auth:
@@ -27,10 +27,10 @@ export async function getVersionObject(
     },
   );
 
-  const versions = releases
+  const lookup = releases
     .filter(
       (release) =>
-        (prerelease || !release.prerelease) && release.assets.length > 5,
+        (includePrerelease || !release.prerelease) && release.assets.length > 5,
     )
     .reduce<Record<string, ReleaseResponse>>((acc, cur) => {
       const tag = cur.tag_name.replace(/^v/, '');
@@ -38,18 +38,18 @@ export async function getVersionObject(
       return acc;
     }, {});
 
+  const versions = Object.keys(lookup);
   const semverRange = range === 'latest' ? '*' : range;
-  const matchedVersionKey = maxSatisfying(Object.keys(versions), semverRange, {
-    includePrerelease: prerelease,
-  });
+  const options = { includePrerelease };
+  const matchedVersionKey = maxSatisfying(versions, semverRange, options);
 
-  if (!matchedVersionKey || !versions[matchedVersionKey]) {
+  if (!matchedVersionKey || !lookup[matchedVersionKey]) {
     throw new Error(
       'Could not find a version that satisfied the version range',
     );
   }
 
-  return versions[matchedVersionKey];
+  return lookup[matchedVersionKey];
 }
 
 /* eslint @typescript-eslint/explicit-module-boundary-types: 0 */
