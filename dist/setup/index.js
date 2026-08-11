@@ -98295,7 +98295,6 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /orgs/{org}/personal-access-tokens",
   "GET /orgs/{org}/personal-access-tokens/{pat_id}/repositories",
   "GET /orgs/{org}/private-registries",
-  "GET /orgs/{org}/projects",
   "GET /orgs/{org}/projectsV2",
   "GET /orgs/{org}/projectsV2/{project_number}/fields",
   "GET /orgs/{org}/projectsV2/{project_number}/items",
@@ -98317,10 +98316,8 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/reactions",
   "GET /orgs/{org}/teams/{team_slug}/invitations",
   "GET /orgs/{org}/teams/{team_slug}/members",
-  "GET /orgs/{org}/teams/{team_slug}/projects",
   "GET /orgs/{org}/teams/{team_slug}/repos",
   "GET /orgs/{org}/teams/{team_slug}/teams",
-  "GET /projects/{project_id}/collaborators",
   "GET /repos/{owner}/{repo}/actions/artifacts",
   "GET /repos/{owner}/{repo}/actions/caches",
   "GET /repos/{owner}/{repo}/actions/organization-secrets",
@@ -98391,7 +98388,6 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /repos/{owner}/{repo}/milestones/{milestone_number}/labels",
   "GET /repos/{owner}/{repo}/notifications",
   "GET /repos/{owner}/{repo}/pages/builds",
-  "GET /repos/{owner}/{repo}/projects",
   "GET /repos/{owner}/{repo}/pulls",
   "GET /repos/{owner}/{repo}/pulls/comments",
   "GET /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions",
@@ -98429,7 +98425,6 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /teams/{team_id}/discussions/{discussion_number}/reactions",
   "GET /teams/{team_id}/invitations",
   "GET /teams/{team_id}/members",
-  "GET /teams/{team_id}/projects",
   "GET /teams/{team_id}/repos",
   "GET /teams/{team_id}/teams",
   "GET /user/blocks",
@@ -98471,7 +98466,6 @@ var paginatingEndpoints = (/* unused pure expression or super */ null && ([
   "GET /users/{username}/keys",
   "GET /users/{username}/orgs",
   "GET /users/{username}/packages",
-  "GET /users/{username}/projects",
   "GET /users/{username}/projectsV2",
   "GET /users/{username}/projectsV2/{project_number}/fields",
   "GET /users/{username}/projectsV2/{project_number}/items",
@@ -98503,50 +98497,38 @@ function paginateRest(octokit) {
 }
 paginateRest.VERSION = plugin_paginate_rest_dist_bundle_VERSION;
 
+/* v8 ignore next -- @preserve */
 
 ;// CONCATENATED MODULE: ./src/lib/get-version.ts
 
 
 
 
-async function getVersionObject(range, prerelease) {
-    const MyOctokit = Octokit.plugin(paginateRest);
-    const octokit = new MyOctokit({
+const OctokitWithPaginate = Octokit.plugin(paginateRest);
+async function getVersionObject(range, includePrerelease) {
+    const octokit = new OctokitWithPaginate({
         auth: getInput('github-token') || process.env.GITHUB_TOKEN || undefined,
     });
-    const versions = (await octokit.paginate('GET /repos/{owner}/{repo}/releases', {
+    const releases = await octokit.paginate('GET /repos/{owner}/{repo}/releases', {
         owner: 'EarthBuild',
         repo: 'earthbuild',
         per_page: 100,
-    }))
-        .filter((release) => {
-        // we expect each version to have at least 6 assets before it can be considered as latest available version
-        return (prerelease || !release.prerelease) && release.assets.length > 5;
-    })
+    });
+    const lookup = releases
+        .filter((release) => (includePrerelease || !release.prerelease) && release.assets.length > 5)
         .reduce((acc, cur) => {
-        // remove 'v' from tag name
-        const tag = cur.tag_name.substring(1);
+        const tag = cur.tag_name.replace(/^v/, '');
         acc[tag] = cur;
         return acc;
     }, {});
-    if (range == 'latest') {
-        const latest = Object.keys(versions).reduce((prev, cur) => {
-            return (0,node_modules_semver.gte)(cur, prev) ? cur : prev;
-        });
-        invariant(latest, 'expect a latest version to exists');
-        const latestVersion = versions[latest];
-        invariant(latestVersion, `expect version ${latest} to exist`);
-        return latestVersion;
-    }
-    const resp = (0,node_modules_semver.maxSatisfying)(Object.keys(versions), range);
-    if (resp === null) {
+    const versions = Object.keys(lookup);
+    const semverRange = range === 'latest' ? '*' : range;
+    const options = { includePrerelease };
+    const matchedVersionKey = (0,node_modules_semver.maxSatisfying)(versions, semverRange, options);
+    if (!matchedVersionKey || !lookup[matchedVersionKey]) {
         throw new Error('Could not find a version that satisfied the version range');
     }
-    const ver = versions[resp];
-    if (!ver) {
-        throw new Error('Could not find a version that satisfied the version range');
-    }
-    return ver;
+    return lookup[matchedVersionKey];
 }
 /* eslint @typescript-eslint/explicit-module-boundary-types: 0 */
 function invariant(condition, message) {
