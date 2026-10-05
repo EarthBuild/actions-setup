@@ -12643,11 +12643,77 @@ class Request {
     }
   }
 
-  onUpgrade (statusCode, headers, socket) {
+  /**
+   * @param {number|null} statusCode
+   * @param {Buffer[]|null} headers
+   * @param {import('node:stream').Duplex} socket
+   * @param {string} [statusText]
+   */
+  onUpgrade (statusCode, headers, socket, statusText = '') {
+    this.onFinally()
+
     assert(!this.aborted)
     assert(!this.completed)
 
-    return this[kHandler].onUpgrade(statusCode, headers, socket)
+    if (statusCode !== null) {
+      this.#publishUpgradeHeaders(statusCode, headers, statusText)
+    }
+
+    const result = this[kHandler].onUpgrade(statusCode, headers, socket)
+
+    if (!this.aborted) {
+      this.completed = true
+      if (statusCode !== null) {
+        this.#publishUpgradeTrailers()
+      }
+    }
+
+    return result
+  }
+
+  /**
+   * @param {number} statusCode
+   * @param {import('node:http2').IncomingHttpHeaders} headers
+   * @param {(headers: import('node:http2').IncomingHttpHeaders) => Buffer[]} parseHeaders
+   * @param {string} [statusText]
+   */
+  onUpgradeResponse (statusCode, headers, parseHeaders, statusText = '') {
+    assert(!this.aborted)
+    assert(this.completed)
+
+    if (channels.headers.hasSubscribers) {
+      this.#publishUpgradeHeaders(statusCode, parseHeaders(headers), statusText)
+    }
+    this.#publishUpgradeTrailers()
+  }
+
+  /**
+   * @param {Error} error
+   */
+  onUpgradeError (error) {
+    assert(!this.aborted)
+    assert(this.completed)
+
+    if (channels.error.hasSubscribers) {
+      channels.error.publish({ request: this, error })
+    }
+  }
+
+  /**
+   * @param {number} statusCode
+   * @param {Buffer[]} headers
+   * @param {string} statusText
+   */
+  #publishUpgradeHeaders (statusCode, headers, statusText) {
+    if (channels.headers.hasSubscribers) {
+      channels.headers.publish({ request: this, response: { statusCode, headers, statusText } })
+    }
+  }
+
+  #publishUpgradeTrailers () {
+    if (channels.trailers.hasSubscribers) {
+      channels.trailers.publish({ request: this, trailers: [] })
+    }
   }
 
   onComplete (trailers) {
@@ -14546,7 +14612,7 @@ class Parser {
   }
 
   onUpgrade (head) {
-    const { upgrade, client, socket, headers, statusCode } = this
+    const { upgrade, client, socket, headers, statusCode, statusText } = this
 
     assert(upgrade)
     assert(client[kSocket] === socket)
@@ -14581,9 +14647,10 @@ class Parser {
     client.emit('disconnect', client[kUrl], [client], new InformationalError('upgrade'))
 
     try {
-      request.onUpgrade(statusCode, headers, socket)
-    } catch (err) {
-      util.destroy(socket, err)
+      request.onUpgrade(statusCode, headers, socket, statusText)
+    } catch (error) {
+      util.errorRequest(client, request, error)
+      util.destroy(socket, error)
     }
 
     client[kResume]()
@@ -15164,12 +15231,22 @@ function writeH1 (client, request) {
   const socket = client[kSocket]
   clearIdleSocketValidation(socket)
 
-  const abort = (err) => {
-    if (request.aborted || request.completed) {
+  /**
+   * @param {Error} [error]
+   */
+  const abort = (error) => {
+    if (request.aborted) {
       return
     }
 
-    util.errorRequest(client, request, err || new RequestAbortedError())
+    if (request.completed) {
+      if (request.upgrade || request.method === 'CONNECT') {
+        util.destroy(socket, new InformationalError('aborted'))
+      }
+      return
+    }
+
+    util.errorRequest(client, request, error || new RequestAbortedError())
 
     util.destroy(body)
     util.destroy(socket, new InformationalError('aborted'))
@@ -15626,6 +15703,7 @@ module.exports = connectH1
 
 
 const assert = __nccwpck_require__(4589)
+const { errorMonitor } = __nccwpck_require__(8474)
 const { pipeline } = __nccwpck_require__(7075)
 const util = __nccwpck_require__(3440)
 const {
@@ -15700,6 +15778,15 @@ function parseH2Headers (headers) {
   }
 
   return result
+}
+
+/**
+ * @param {import('node:http2').IncomingHttpHeaders} headers
+ * @returns {Buffer[]}
+ */
+function parseH2ResponseHeaders (headers) {
+  const { [HTTP2_HEADER_STATUS]: _statusCode, ...realHeaders } = headers
+  return parseH2Headers(realHeaders)
 }
 
 async function connectH2 (client, socket) {
@@ -15922,22 +16009,32 @@ function writeH2 (client, request) {
   headers[HTTP2_HEADER_AUTHORITY] = host || `${hostname}${port ? `:${port}` : ''}`
   headers[HTTP2_HEADER_METHOD] = method
 
-  const abort = (err) => {
-    if (request.aborted || request.completed) {
+  /**
+   * @param {Error} [error]
+   */
+  const abort = (error) => {
+    if (request.aborted) {
       return
     }
 
-    err = err || new RequestAbortedError()
+    if (request.completed) {
+      if (method === 'CONNECT' && stream != null) {
+        util.destroy(stream, error || new RequestAbortedError())
+      }
+      return
+    }
 
-    util.errorRequest(client, request, err)
+    error = error || new RequestAbortedError()
+
+    util.errorRequest(client, request, error)
 
     if (stream != null) {
-      util.destroy(stream, err)
+      util.destroy(stream, error)
     }
 
     // We do not destroy the socket as we can continue using the session
     // the stream get's destroyed and the session remains to create new streams
-    util.destroy(body, err)
+    util.destroy(body, error)
     client[kQueue][client[kRunningIdx]++] = null
     client[kResume]()
   }
@@ -15956,25 +16053,57 @@ function writeH2 (client, request) {
 
   if (method === 'CONNECT') {
     session.ref()
-    // We are already connected, streams are pending, first request
-    // will create a new stream. We trigger a request to create the stream and wait until
-    // `ready` event is triggered
     // We disabled endStream to allow the user to write to the stream
     stream = session.request(headers, { endStream: false, signal })
+    let upgradeResponseFinished = false
 
-    if (stream.id && !stream.pending) {
-      request.onUpgrade(null, null, stream)
-      ++session[kOpenStreams]
-      client[kQueue][client[kRunningIdx]++] = null
-    } else {
-      stream.once('ready', () => {
-        request.onUpgrade(null, null, stream)
-        ++session[kOpenStreams]
-        client[kQueue][client[kRunningIdx]++] = null
-      })
+    /**
+     * @param {import('node:http2').IncomingHttpHeaders} headers
+     */
+    const onResponse = (headers) => {
+      upgradeResponseFinished = true
+      stream.off(errorMonitor, onUpgradeError)
+      request.onUpgradeResponse(Number(headers[HTTP2_HEADER_STATUS]), headers, parseH2ResponseHeaders)
     }
 
+    /**
+     * @param {Error} error
+     */
+    const onUpgradeError = (error) => {
+      upgradeResponseFinished = true
+      stream.off('response', onResponse)
+      request.onUpgradeError(error)
+    }
+
+    const onReady = () => {
+      try {
+        request.onUpgrade(null, null, stream)
+      } catch (error) {
+        stream.off('response', onResponse)
+        abort(error)
+        return
+      }
+
+      if (request.aborted) {
+        return
+      }
+
+      stream.off('error', abort)
+      stream.once(errorMonitor, onUpgradeError)
+      client[kQueue][client[kRunningIdx]++] = null
+    }
+
+    stream.once('response', onResponse)
+    stream.once('error', abort)
+    ++session[kOpenStreams]
+    onReady()
+
     stream.once('close', () => {
+      if (!upgradeResponseFinished && request.completed) {
+        stream.off('response', onResponse)
+        stream.off(errorMonitor, onUpgradeError)
+        request.onUpgradeError(new InformationalError(`HTTP/2: "stream error" received - code ${stream.rstCode}`))
+      }
       session[kOpenStreams] -= 1
       if (session[kOpenStreams] === 0) session.unref()
     })
@@ -18788,7 +18917,10 @@ class RetryHandler {
     this.retryCount += 1
 
     if (statusCode >= 300) {
-      if (this.retryOpts.statusCodes.includes(statusCode) === false) {
+      // Only expose a response if no earlier attempt has reached the caller.
+      // Otherwise abort this attempt so the error settles the existing body
+      // instead of replacing it with a new response.
+      if (!this.headersSent && this.retryOpts.statusCodes.includes(statusCode) === false) {
         this.headersSent = true
         this.checkpointResponseEnd(headers, resume)
         return this.handler.onHeaders(
@@ -37926,7 +38058,7 @@ __nccwpck_require__.d(__webpack_exports__, {
   e: () => (/* binding */ run)
 });
 
-// NAMESPACE OBJECT: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/models/mappers.js
+// NAMESPACE OBJECT: ./node_modules/@azure/storage-blob/dist/esm/generated/src/models/mappers.js
 var mappers_namespaceObject = {};
 __nccwpck_require__.r(mappers_namespaceObject);
 __nccwpck_require__.d(mappers_namespaceObject, {
@@ -48164,7 +48296,7 @@ function statusCodeToNumber(statusCode) {
 
 
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/pipeline.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/pipeline.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -48222,7 +48354,7 @@ function esm_createClientLogger(namespace) {
     return esm_context.createClientLogger(namespace);
 }
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/log.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/log.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -48400,7 +48532,7 @@ function tlsPolicy_tlsPolicy(tlsSettings) {
 
 
 //# sourceMappingURL=internal.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/logPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/logPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -48414,20 +48546,20 @@ const logPolicy_logPolicyName = (/* unused pure expression or super */ null && (
  * @param options - Options to configure logPolicy.
  */
 function policies_logPolicy_logPolicy(options = {}) {
-    return tspLogPolicy({
-        logger: coreLogger.info,
+    return logPolicy_logPolicy({
+        logger: esm_log_logger.info,
         ...options,
     });
 }
 //# sourceMappingURL=logPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/redirectPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/redirectPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
 /**
  * The programmatic identifier of the redirectPolicy.
  */
-const redirectPolicy_redirectPolicyName = (/* unused pure expression or super */ null && (tspRedirectPolicyName));
+const redirectPolicy_redirectPolicyName = redirectPolicyName;
 /**
  * A policy to follow Location headers from the server in order
  * to support server-side redirection.
@@ -48435,10 +48567,10 @@ const redirectPolicy_redirectPolicyName = (/* unused pure expression or super */
  * @param options - Options to control policy behavior.
  */
 function policies_redirectPolicy_redirectPolicy(options = {}) {
-    return tspRedirectPolicy(options);
+    return redirectPolicy_redirectPolicy(options);
 }
 //# sourceMappingURL=redirectPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/util/userAgentPlatform.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/userAgentPlatform.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -48453,9 +48585,9 @@ function userAgentPlatform_getHeaderName() {
  * @internal
  */
 async function util_userAgentPlatform_setPlatformSpecificData(map) {
-    if (process && process.versions) {
-        const osInfo = `${os.type()} ${os.release()}; ${os.arch()}`;
-        const versions = process.versions;
+    if (external_node_process_namespaceObject && external_node_process_namespaceObject.versions) {
+        const osInfo = `${external_node_os_namespaceObject.type()} ${external_node_os_namespaceObject.release()}; ${external_node_os_namespaceObject.arch()}`;
+        const versions = external_node_process_namespaceObject.versions;
         if (versions.bun) {
             map.set("Bun", `${versions.bun} (${osInfo})`);
         }
@@ -48468,7 +48600,13 @@ async function util_userAgentPlatform_setPlatformSpecificData(map) {
     }
 }
 //# sourceMappingURL=userAgentPlatform.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/util/userAgent.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/constants.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+const esm_constants_SDK_VERSION = "1.22.3";
+const esm_constants_DEFAULT_RETRY_POLICY_COUNT = 3;
+//# sourceMappingURL=constants.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/userAgent.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -48492,14 +48630,14 @@ function userAgent_getUserAgentHeaderName() {
  */
 async function util_userAgent_getUserAgentValue(prefix) {
     const runtimeInfo = new Map();
-    runtimeInfo.set("core-rest-pipeline", SDK_VERSION);
-    await setPlatformSpecificData(runtimeInfo);
+    runtimeInfo.set("core-rest-pipeline", esm_constants_SDK_VERSION);
+    await util_userAgentPlatform_setPlatformSpecificData(runtimeInfo);
     const defaultAgent = userAgent_getUserAgentString(runtimeInfo);
     const userAgentValue = prefix ? `${prefix} ${defaultAgent}` : defaultAgent;
     return userAgentValue;
 }
 //# sourceMappingURL=userAgent.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/userAgentPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/userAgentPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -48514,7 +48652,7 @@ const userAgentPolicy_userAgentPolicyName = "userAgentPolicy";
  * @param options - Options to customize the user agent value.
  */
 function policies_userAgentPolicy_userAgentPolicy(options = {}) {
-    const userAgentValue = getUserAgentValue(options.userAgentPrefix);
+    const userAgentValue = util_userAgent_getUserAgentValue(options.userAgentPrefix);
     return {
         name: userAgentPolicy_userAgentPolicyName,
         async sendRequest(request, next) {
@@ -48836,7 +48974,7 @@ function esm_stringToUint8Array(value, format) {
     return bytesEncoding_stringToUint8Array(value, format);
 }
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/util/file.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/file.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -48966,7 +49104,7 @@ function toArrayBuffer(source) {
     return source.map((x) => x);
 }
 //# sourceMappingURL=file.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/multipartPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/multipartPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -48974,19 +49112,19 @@ function toArrayBuffer(source) {
 /**
  * Name of multipart policy
  */
-const policies_multipartPolicy_multipartPolicyName = (/* unused pure expression or super */ null && (tspMultipartPolicyName));
+const policies_multipartPolicy_multipartPolicyName = multipartPolicy_multipartPolicyName;
 /**
  * Pipeline policy for multipart requests
  */
 function policies_multipartPolicy_multipartPolicy() {
-    const tspPolicy = tspMultipartPolicy();
+    const tspPolicy = multipartPolicy_multipartPolicy();
     return {
         name: policies_multipartPolicy_multipartPolicyName,
         sendRequest: async (request, next) => {
             if (request.multipartBody) {
                 for (const part of request.multipartBody.parts) {
-                    if (hasRawContent(part.body)) {
-                        part.body = getRawContent(part.body);
+                    if (file_hasRawContent(part.body)) {
+                        part.body = file_getRawContent(part.body);
                     }
                 }
             }
@@ -48995,7 +49133,7 @@ function policies_multipartPolicy_multipartPolicy() {
     };
 }
 //# sourceMappingURL=multipartPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/decompressResponsePolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/decompressResponsePolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49008,10 +49146,10 @@ const decompressResponsePolicy_decompressResponsePolicyName = decompressResponse
  * https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Accept-Encoding
  */
 function policies_decompressResponsePolicy_decompressResponsePolicy() {
-    return tspDecompressResponsePolicy();
+    return decompressResponsePolicy_decompressResponsePolicy();
 }
 //# sourceMappingURL=decompressResponsePolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/defaultRetryPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/defaultRetryPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49026,10 +49164,10 @@ const defaultRetryPolicy_defaultRetryPolicyName = (/* unused pure expression or 
  * - Or otherwise if the outgoing request fails, it will retry with an exponentially increasing delay.
  */
 function policies_defaultRetryPolicy_defaultRetryPolicy(options = {}) {
-    return tspDefaultRetryPolicy(options);
+    return defaultRetryPolicy_defaultRetryPolicy(options);
 }
 //# sourceMappingURL=defaultRetryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/formDataPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/formDataPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49041,10 +49179,10 @@ const formDataPolicy_formDataPolicyName = (/* unused pure expression or super */
  * A policy that encodes FormData on the request into the body.
  */
 function policies_formDataPolicy_formDataPolicy() {
-    return tspFormDataPolicy();
+    return formDataPolicy_formDataPolicy();
 }
 //# sourceMappingURL=formDataPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/proxyPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/proxyPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49070,10 +49208,35 @@ function proxyPolicy_getDefaultProxySettings(proxyUrl) {
  * @param options - additional settings, for example, custom NO_PROXY patterns
  */
 function policies_proxyPolicy_proxyPolicy(proxySettings, options) {
-    return tspProxyPolicy(proxySettings, options);
+    return proxyPolicy_proxyPolicy(proxySettings, options);
 }
 //# sourceMappingURL=proxyPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/agentPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/setClientRequestIdPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+/**
+ * The programmatic identifier of the setClientRequestIdPolicy.
+ */
+const setClientRequestIdPolicyName = "setClientRequestIdPolicy";
+/**
+ * Each PipelineRequest gets a unique id upon creation.
+ * This policy passes that unique id along via an HTTP header to enable better
+ * telemetry and tracing.
+ * @param requestIdHeaderName - The name of the header to pass the request ID to.
+ */
+function setClientRequestIdPolicy_setClientRequestIdPolicy(requestIdHeaderName = "x-ms-client-request-id") {
+    return {
+        name: setClientRequestIdPolicyName,
+        async sendRequest(request, next) {
+            if (!request.headers.has(requestIdHeaderName)) {
+                request.headers.set(requestIdHeaderName, request.requestId);
+            }
+            return next(request);
+        },
+    };
+}
+//# sourceMappingURL=setClientRequestIdPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/agentPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49085,10 +49248,10 @@ const agentPolicy_agentPolicyName = (/* unused pure expression or super */ null 
  * Gets a pipeline policy that sets http.agent
  */
 function policies_agentPolicy_agentPolicy(agent) {
-    return tspAgentPolicy(agent);
+    return agentPolicy_agentPolicy(agent);
 }
 //# sourceMappingURL=agentPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/tlsPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/tlsPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49100,7 +49263,7 @@ const tlsPolicy_tlsPolicyName = (/* unused pure expression or super */ null && (
  * Gets a pipeline policy that adds the client certificate to the HttpClient agent for authentication.
  */
 function policies_tlsPolicy_tlsPolicy(tlsSettings) {
-    return tspTlsPolicy(tlsSettings);
+    return tlsPolicy_tlsPolicy(tlsSettings);
 }
 //# sourceMappingURL=tlsPolicy.js.map
 ;// CONCATENATED MODULE: ./node_modules/@azure/core-tracing/dist/esm/tracingContext.js
@@ -49314,7 +49477,7 @@ function tracingClient_createTracingClient(options) {
 
 
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/restError.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/restError.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49322,7 +49485,7 @@ function tracingClient_createTracingClient(options) {
  * A custom error type for failed pipeline requests.
  */
 // eslint-disable-next-line @typescript-eslint/no-redeclare
-const esm_restError_RestError = (/* unused pure expression or super */ null && (TspRestError));
+const esm_restError_RestError = restError_RestError;
 /**
  * Typeguard for RestError
  * @param e - Something caught by a catch clause.
@@ -49331,7 +49494,7 @@ function esm_restError_isRestError(e) {
     return restError_isRestError(e);
 }
 //# sourceMappingURL=restError.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/tracingPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/tracingPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49352,8 +49515,8 @@ const tracingPolicyName = "tracingPolicy";
  * @param options - Options to configure the telemetry logged by the tracing policy.
  */
 function tracingPolicy_tracingPolicy(options = {}) {
-    const userAgentPromise = getUserAgentValue(options.userAgentPrefix);
-    const sanitizer = new Sanitizer({
+    const userAgentPromise = util_userAgent_getUserAgentValue(options.userAgentPrefix);
+    const sanitizer = new sanitizer_Sanitizer({
         additionalAllowedQueryParameters: options.additionalAllowedQueryParameters,
     });
     const tracingClient = tryCreateTracingClient();
@@ -49391,14 +49554,14 @@ function tracingPolicy_tracingPolicy(options = {}) {
 }
 function tryCreateTracingClient() {
     try {
-        return createTracingClient({
+        return tracingClient_createTracingClient({
             namespace: "",
             packageName: "@azure/core-rest-pipeline",
-            packageVersion: SDK_VERSION,
+            packageVersion: esm_constants_SDK_VERSION,
         });
     }
     catch (e) {
-        logger.warning(`Error when creating the TracingClient: ${getErrorMessage(e)}`);
+        esm_log_logger.warning(`Error when creating the TracingClient: ${error_getErrorMessage(e)}`);
         return undefined;
     }
 }
@@ -49422,7 +49585,7 @@ function tryCreateSpan(tracingClient, request, spanAttributes) {
         return { span, tracingContext: updatedOptions.tracingOptions.tracingContext };
     }
     catch (e) {
-        logger.warning(`Skipping creating a tracing span due to an error: ${getErrorMessage(e)}`);
+        esm_log_logger.warning(`Skipping creating a tracing span due to an error: ${error_getErrorMessage(e)}`);
         return undefined;
     }
 }
@@ -49430,15 +49593,15 @@ function tryProcessError(span, error) {
     try {
         span.setStatus({
             status: "error",
-            error: isError(error) ? error : undefined,
+            error: esm_isError(error) ? error : undefined,
         });
-        if (isRestError(error) && error.statusCode) {
+        if (esm_restError_isRestError(error) && error.statusCode) {
             span.setAttribute("http.status_code", error.statusCode);
         }
         span.end();
     }
     catch (e) {
-        logger.warning(`Skipping tracing span processing due to an error: ${getErrorMessage(e)}`);
+        esm_log_logger.warning(`Skipping tracing span processing due to an error: ${error_getErrorMessage(e)}`);
     }
 }
 function tryProcessResponse(span, response) {
@@ -49459,11 +49622,73 @@ function tryProcessResponse(span, response) {
         span.end();
     }
     catch (e) {
-        logger.warning(`Skipping tracing span processing due to an error: ${getErrorMessage(e)}`);
+        esm_log_logger.warning(`Skipping tracing span processing due to an error: ${error_getErrorMessage(e)}`);
     }
 }
 //# sourceMappingURL=tracingPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/createPipelineFromOptions.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/wrapAbortSignal.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+/**
+ * Creates a native AbortSignal which reflects the state of the provided AbortSignalLike.
+ * If the AbortSignalLike is already a native AbortSignal, it is returned as is.
+ * @param abortSignalLike - The AbortSignalLike to wrap.
+ * @returns - An object containing the native AbortSignal and an optional cleanup function. The cleanup function should be called when the AbortSignal is no longer needed.
+ */
+function wrapAbortSignalLike(abortSignalLike) {
+    if (abortSignalLike instanceof AbortSignal) {
+        return { abortSignal: abortSignalLike };
+    }
+    if (abortSignalLike.aborted) {
+        return { abortSignal: AbortSignal.abort(abortSignalLike.reason) };
+    }
+    const controller = new AbortController();
+    let needsCleanup = true;
+    function cleanup() {
+        if (needsCleanup) {
+            abortSignalLike.removeEventListener("abort", listener);
+            needsCleanup = false;
+        }
+    }
+    function listener() {
+        controller.abort(abortSignalLike.reason);
+        cleanup();
+    }
+    abortSignalLike.addEventListener("abort", listener);
+    return { abortSignal: controller.signal, cleanup };
+}
+//# sourceMappingURL=wrapAbortSignal.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/wrapAbortSignalLikePolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+const wrapAbortSignalLikePolicyName = "wrapAbortSignalLikePolicy";
+/**
+ * Policy that ensure that any AbortSignalLike is wrapped in a native AbortSignal for processing by the pipeline.
+ * Since the ts-http-runtime expects a native AbortSignal, this policy is used to ensure that any AbortSignalLike is wrapped in a native AbortSignal.
+ *
+ * @returns - created policy
+ */
+function wrapAbortSignalLikePolicy_wrapAbortSignalLikePolicy() {
+    return {
+        name: wrapAbortSignalLikePolicyName,
+        sendRequest: async (request, next) => {
+            if (!request.abortSignal) {
+                return next(request);
+            }
+            const { abortSignal, cleanup } = wrapAbortSignalLike(request.abortSignal);
+            request.abortSignal = abortSignal;
+            try {
+                return await next(request);
+            }
+            finally {
+                cleanup?.();
+            }
+        },
+    };
+}
+//# sourceMappingURL=wrapAbortSignalLikePolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/createPipelineFromOptions.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49486,39 +49711,39 @@ function tryProcessResponse(span, response) {
  * @param options - Options to configure a custom pipeline.
  */
 function esm_createPipelineFromOptions_createPipelineFromOptions(options) {
-    const pipeline = createEmptyPipeline();
-    if (isNodeLike) {
+    const pipeline = esm_pipeline_createEmptyPipeline();
+    if (esm_isNodeLike) {
         if (options.agent) {
-            pipeline.addPolicy(agentPolicy(options.agent));
+            pipeline.addPolicy(policies_agentPolicy_agentPolicy(options.agent));
         }
         if (options.tlsOptions) {
-            pipeline.addPolicy(tlsPolicy(options.tlsOptions));
+            pipeline.addPolicy(policies_tlsPolicy_tlsPolicy(options.tlsOptions));
         }
-        pipeline.addPolicy(proxyPolicy(options.proxyOptions));
-        pipeline.addPolicy(decompressResponsePolicy());
+        pipeline.addPolicy(policies_proxyPolicy_proxyPolicy(options.proxyOptions));
+        pipeline.addPolicy(policies_decompressResponsePolicy_decompressResponsePolicy());
     }
-    pipeline.addPolicy(wrapAbortSignalLikePolicy());
-    pipeline.addPolicy(formDataPolicy(), { beforePolicies: [multipartPolicyName] });
-    pipeline.addPolicy(userAgentPolicy(options.userAgentOptions));
-    pipeline.addPolicy(setClientRequestIdPolicy(options.telemetryOptions?.clientRequestIdHeaderName));
+    pipeline.addPolicy(wrapAbortSignalLikePolicy_wrapAbortSignalLikePolicy());
+    pipeline.addPolicy(policies_formDataPolicy_formDataPolicy(), { beforePolicies: [policies_multipartPolicy_multipartPolicyName] });
+    pipeline.addPolicy(policies_userAgentPolicy_userAgentPolicy(options.userAgentOptions));
+    pipeline.addPolicy(setClientRequestIdPolicy_setClientRequestIdPolicy(options.telemetryOptions?.clientRequestIdHeaderName));
     // The multipart policy is added after policies with no phase, so that
     // policies can be added between it and formDataPolicy to modify
     // properties (e.g., making the boundary constant in recorded tests).
-    pipeline.addPolicy(multipartPolicy(), { afterPhase: "Deserialize" });
-    pipeline.addPolicy(defaultRetryPolicy(options.retryOptions), { phase: "Retry" });
-    pipeline.addPolicy(tracingPolicy({ ...options.userAgentOptions, ...options.loggingOptions }), {
+    pipeline.addPolicy(policies_multipartPolicy_multipartPolicy(), { afterPhase: "Deserialize" });
+    pipeline.addPolicy(policies_defaultRetryPolicy_defaultRetryPolicy(options.retryOptions), { phase: "Retry" });
+    pipeline.addPolicy(tracingPolicy_tracingPolicy({ ...options.userAgentOptions, ...options.loggingOptions }), {
         afterPhase: "Retry",
     });
-    if (isNodeLike) {
+    if (esm_isNodeLike) {
         // Both XHR and Fetch expect to handle redirects automatically,
         // so only include this policy when we're in Node.
-        pipeline.addPolicy(redirectPolicy(options.redirectOptions), { afterPhase: "Retry" });
+        pipeline.addPolicy(policies_redirectPolicy_redirectPolicy(options.redirectOptions), { afterPhase: "Retry" });
     }
-    pipeline.addPolicy(logPolicy(options.loggingOptions), { afterPhase: "Sign" });
+    pipeline.addPolicy(policies_logPolicy_logPolicy(options.loggingOptions), { afterPhase: "Sign" });
     return pipeline;
 }
 //# sourceMappingURL=createPipelineFromOptions.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/defaultHttpClient.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/defaultHttpClient.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49527,7 +49752,7 @@ function esm_createPipelineFromOptions_createPipelineFromOptions(options) {
  * Create the correct HttpClient for the current environment.
  */
 function esm_defaultHttpClient_createDefaultHttpClient() {
-    const client = tspCreateDefaultHttpClient();
+    const client = defaultHttpClient_createDefaultHttpClient();
     return {
         async sendRequest(request) {
             // we wrap any AbortSignalLike here since the TypeSpec runtime expects a native AbortSignal.
@@ -49546,7 +49771,7 @@ function esm_defaultHttpClient_createDefaultHttpClient() {
     };
 }
 //# sourceMappingURL=defaultHttpClient.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/httpHeaders.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/httpHeaders.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49558,7 +49783,7 @@ function esm_httpHeaders_createHttpHeaders(rawHeaders) {
     return httpHeaders_createHttpHeaders(rawHeaders);
 }
 //# sourceMappingURL=httpHeaders.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/pipelineRequest.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/pipelineRequest.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49571,10 +49796,10 @@ function esm_pipelineRequest_createPipelineRequest(options) {
     // Cast required due to difference between ts-http-runtime requiring AbortSignal while core-rest-pipeline allows
     // the more generic AbortSignalLike. The wrapAbortSignalLike pipeline policy will take care of ensuring that any AbortSignalLike in the request
     // is converted into a true AbortSignal.
-    return tspCreatePipelineRequest(options);
+    return pipelineRequest_createPipelineRequest(options);
 }
 //# sourceMappingURL=pipelineRequest.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/exponentialRetryPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/exponentialRetryPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49590,7 +49815,7 @@ function exponentialRetryPolicy_exponentialRetryPolicy(options = {}) {
     return tspExponentialRetryPolicy(options);
 }
 //# sourceMappingURL=exponentialRetryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/systemErrorRetryPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/systemErrorRetryPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49608,7 +49833,7 @@ function systemErrorRetryPolicy_systemErrorRetryPolicy(options = {}) {
     return tspSystemErrorRetryPolicy(options);
 }
 //# sourceMappingURL=systemErrorRetryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/throttlingRetryPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/throttlingRetryPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49630,7 +49855,7 @@ function throttlingRetryPolicy_throttlingRetryPolicy(options = {}) {
     return tspThrottlingRetryPolicy(options);
 }
 //# sourceMappingURL=throttlingRetryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/retryPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/retryPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49650,7 +49875,7 @@ function policies_retryPolicy_retryPolicy(strategies, options = { maxRetries: DE
     });
 }
 //# sourceMappingURL=retryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/util/tokenCycler.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/tokenCycler.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -49814,7 +50039,7 @@ function tokenCycler_createTokenCycler(credential, tokenCyclerOptions) {
     };
 }
 //# sourceMappingURL=tokenCycler.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/bearerTokenAuthenticationPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/bearerTokenAuthenticationPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -50050,7 +50275,7 @@ function getCaeChallengeClaims(challenges) {
     return parsedChallenges.find((x) => x.scheme === "Bearer" && x.params.claims && x.params.error === "insufficient_claims")?.params.claims;
 }
 //# sourceMappingURL=bearerTokenAuthenticationPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/policies/auxiliaryAuthenticationHeaderPolicy.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/auxiliaryAuthenticationHeaderPolicy.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -50113,7 +50338,7 @@ function auxiliaryAuthenticationHeaderPolicy(options) {
     };
 }
 //# sourceMappingURL=auxiliaryAuthenticationHeaderPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/core-rest-pipeline/dist/esm/index.js
+;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/index.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -50320,1359 +50545,6 @@ function pipelineContainsDisableKeepAlivePolicy(pipeline) {
     return pipeline.getOrderedPolicies().some((policy) => policy.name === disableKeepAlivePolicyName);
 }
 //# sourceMappingURL=disableKeepAlivePolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/pipeline.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * Creates a totally empty pipeline.
- * Useful for testing or creating a custom one.
- */
-function dist_esm_pipeline_createEmptyPipeline() {
-    return pipeline_createEmptyPipeline();
-}
-//# sourceMappingURL=pipeline.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/log.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-const dist_esm_log_logger = esm_createClientLogger("core-rest-pipeline");
-//# sourceMappingURL=log.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/logPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-/**
- * The programmatic identifier of the logPolicy.
- */
-const policies_logPolicy_logPolicyName = (/* unused pure expression or super */ null && (tspLogPolicyName));
-/**
- * A policy that logs all requests and responses.
- * @param options - Options to configure logPolicy.
- */
-function esm_policies_logPolicy_logPolicy(options = {}) {
-    return logPolicy_logPolicy({
-        logger: dist_esm_log_logger.info,
-        ...options,
-    });
-}
-//# sourceMappingURL=logPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/redirectPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * The programmatic identifier of the redirectPolicy.
- */
-const policies_redirectPolicy_redirectPolicyName = redirectPolicyName;
-/**
- * A policy to follow Location headers from the server in order
- * to support server-side redirection.
- * In the browser, this policy is not used.
- * @param options - Options to control policy behavior.
- */
-function esm_policies_redirectPolicy_redirectPolicy(options = {}) {
-    return redirectPolicy_redirectPolicy(options);
-}
-//# sourceMappingURL=redirectPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/userAgentPlatform.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-/**
- * @internal
- */
-function util_userAgentPlatform_getHeaderName() {
-    return "User-Agent";
-}
-/**
- * @internal
- */
-async function esm_util_userAgentPlatform_setPlatformSpecificData(map) {
-    if (external_node_process_namespaceObject && external_node_process_namespaceObject.versions) {
-        const osInfo = `${external_node_os_namespaceObject.type()} ${external_node_os_namespaceObject.release()}; ${external_node_os_namespaceObject.arch()}`;
-        if (external_node_process_namespaceObject.versions.bun) {
-            map.set("Bun", `${external_node_process_namespaceObject.versions.bun} (${osInfo})`);
-        }
-        else if (external_node_process_namespaceObject.versions.deno) {
-            map.set("Deno", `${external_node_process_namespaceObject.versions.deno} (${osInfo})`);
-        }
-        else if (external_node_process_namespaceObject.versions.node) {
-            map.set("Node", `${external_node_process_namespaceObject.versions.node} (${osInfo})`);
-        }
-    }
-}
-//# sourceMappingURL=userAgentPlatform.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/constants.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-const esm_constants_SDK_VERSION = "1.25.0";
-const esm_constants_DEFAULT_RETRY_POLICY_COUNT = 3;
-//# sourceMappingURL=constants.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/userAgent.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-function util_userAgent_getUserAgentString(telemetryInfo) {
-    const parts = [];
-    for (const [key, value] of telemetryInfo) {
-        const token = value ? `${key}/${value}` : key;
-        parts.push(token);
-    }
-    return parts.join(" ");
-}
-/**
- * @internal
- */
-function util_userAgent_getUserAgentHeaderName() {
-    return util_userAgentPlatform_getHeaderName();
-}
-/**
- * @internal
- */
-async function esm_util_userAgent_getUserAgentValue(prefix) {
-    const runtimeInfo = new Map();
-    runtimeInfo.set("core-rest-pipeline", esm_constants_SDK_VERSION);
-    await esm_util_userAgentPlatform_setPlatformSpecificData(runtimeInfo);
-    const defaultAgent = util_userAgent_getUserAgentString(runtimeInfo);
-    const userAgentValue = prefix ? `${prefix} ${defaultAgent}` : defaultAgent;
-    return userAgentValue;
-}
-//# sourceMappingURL=userAgent.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/userAgentPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-const policies_userAgentPolicy_UserAgentHeaderName = util_userAgent_getUserAgentHeaderName();
-/**
- * The programmatic identifier of the userAgentPolicy.
- */
-const policies_userAgentPolicy_userAgentPolicyName = "userAgentPolicy";
-/**
- * A policy that sets the User-Agent header (or equivalent) to reflect
- * the library version.
- * @param options - Options to customize the user agent value.
- */
-function esm_policies_userAgentPolicy_userAgentPolicy(options = {}) {
-    const userAgentValue = esm_util_userAgent_getUserAgentValue(options.userAgentPrefix);
-    return {
-        name: policies_userAgentPolicy_userAgentPolicyName,
-        async sendRequest(request, next) {
-            if (!request.headers.has(policies_userAgentPolicy_UserAgentHeaderName)) {
-                request.headers.set(policies_userAgentPolicy_UserAgentHeaderName, await userAgentValue);
-            }
-            return next(request);
-        },
-    };
-}
-//# sourceMappingURL=userAgentPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/createFile.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * Create an object that implements the File interface. This object is intended to be
- * passed into RequestBodyType.formData, and is not guaranteed to work as expected in
- * other situations.
- *
- * Use this function to create a File object for use in RequestBodyType.formData in environments
- * where the global File object is unavailable.
- *
- * @param content - the content of the file as a Uint8Array in memory.
- * @param name - the name of the file.
- * @param options - optional metadata about the file, e.g. file name, file size, MIME type.
- */
-function createFile_createFile(content, name, options = {}) {
-    return createRawFile(content, name, options);
-}
-//# sourceMappingURL=createFile.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/file.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-function util_file_isNodeReadableStream(x) {
-    return typeof x === "object" && x !== null && "pipe" in x && typeof x.pipe === "function";
-}
-const file_unimplementedMethods = {
-    arrayBuffer: () => {
-        throw new Error("Not implemented");
-    },
-    bytes: () => {
-        throw new Error("Not implemented");
-    },
-    slice: () => {
-        throw new Error("Not implemented");
-    },
-    text: () => {
-        throw new Error("Not implemented");
-    },
-};
-/**
- * Private symbol used as key on objects created using createFile containing the
- * original source of the file object.
- *
- * This is used in Node to access the original Node stream without using Blob#stream, which
- * returns a web stream. This is done to avoid a couple of bugs to do with Blob#stream and
- * Readable#to/fromWeb in Node versions we support:
- * - https://github.com/nodejs/node/issues/42694 (fixed in Node 18.14)
- * - https://github.com/nodejs/node/issues/48916 (fixed in Node 20.6)
- *
- * Once these versions are no longer supported, we may be able to stop doing this.
- *
- * @internal
- */
-const file_rawContent = Symbol("rawContent");
-/**
- * Type guard to check if a given object is a blob-like object with a raw content property.
- */
-function util_file_hasRawContent(x) {
-    return typeof x[file_rawContent] === "function";
-}
-/**
- * Extract the raw content from a given blob-like object. If the input was created using createFile
- * or createFileFromStream, the exact content passed into createFile/createFileFromStream will be used.
- * For true instances of Blob and File, returns the actual blob.
- *
- * @internal
- */
-function util_file_getRawContent(blob) {
-    if (util_file_hasRawContent(blob)) {
-        return blob[file_rawContent]();
-    }
-    else {
-        return blob;
-    }
-}
-/**
- * @internal
- *
- * Creates a File-like object tagged with rawContent for efficient streaming access.
- * Used by the Node createFile to avoid Blob#stream() bugs.
- */
-function file_createRawFile(content, name, options = {}) {
-    return {
-        ...file_unimplementedMethods,
-        type: options.type ?? "",
-        lastModified: options.lastModified ?? new Date().getTime(),
-        webkitRelativePath: options.webkitRelativePath ?? "",
-        size: content.byteLength,
-        name,
-        arrayBuffer: async () => file_toArrayBuffer(content).buffer,
-        stream: () => new Blob([file_toArrayBuffer(content)]).stream(),
-        [file_rawContent]: () => content,
-    };
-}
-/**
- * Create an object that implements the File interface. This object is intended to be
- * passed into RequestBodyType.formData, and is not guaranteed to work as expected in
- * other situations.
- *
- * Use this function to:
- * - Create a File object for use in RequestBodyType.formData in environments where the
- *   global File object is unavailable.
- * - Create a File-like object from a readable stream without reading the stream into memory.
- *
- * @param stream - the content of the file as a callback returning a stream. When a File object made using createFile is
- *                  passed in a request's form data map, the stream will not be read into memory
- *                  and instead will be streamed when the request is made. In the event of a retry, the
- *                  stream needs to be read again, so this callback SHOULD return a fresh stream if possible.
- * @param name - the name of the file.
- * @param options - optional metadata about the file, e.g. file name, file size, MIME type.
- */
-function file_createFileFromStream(stream, name, options = {}) {
-    return {
-        ...file_unimplementedMethods,
-        type: options.type ?? "",
-        lastModified: options.lastModified ?? new Date().getTime(),
-        webkitRelativePath: options.webkitRelativePath ?? "",
-        size: options.size ?? -1,
-        name,
-        stream: () => {
-            const s = stream();
-            if (util_file_isNodeReadableStream(s)) {
-                throw new Error("Not supported: a Node stream was provided as input to createFileFromStream.");
-            }
-            return s;
-        },
-        [file_rawContent]: stream,
-    };
-}
-
-function hasArrayBuffer(source) {
-    return "resize" in source.buffer;
-}
-function file_toArrayBuffer(source) {
-    if (hasArrayBuffer(source)) {
-        // ArrayBuffer — return a copy if the view is a subarray of a larger buffer
-        if (source.byteOffset !== 0 || source.byteLength !== source.buffer.byteLength) {
-            return new Uint8Array(source);
-        }
-        return source;
-    }
-    // SharedArrayBuffer
-    return source.map((x) => x);
-}
-//# sourceMappingURL=file.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/multipartPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-/**
- * Name of multipart policy
- */
-const esm_policies_multipartPolicy_multipartPolicyName = multipartPolicy_multipartPolicyName;
-/**
- * Pipeline policy for multipart requests
- */
-function esm_policies_multipartPolicy_multipartPolicy() {
-    const tspPolicy = multipartPolicy_multipartPolicy();
-    return {
-        name: esm_policies_multipartPolicy_multipartPolicyName,
-        sendRequest: async (request, next) => {
-            if (request.multipartBody) {
-                for (const part of request.multipartBody.parts) {
-                    if (util_file_hasRawContent(part.body)) {
-                        part.body = util_file_getRawContent(part.body);
-                    }
-                }
-            }
-            return tspPolicy.sendRequest(request, next);
-        },
-    };
-}
-//# sourceMappingURL=multipartPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/decompressResponsePolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * The programmatic identifier of the decompressResponsePolicy.
- */
-const policies_decompressResponsePolicy_decompressResponsePolicyName = (/* unused pure expression or super */ null && (tspDecompressResponsePolicyName));
-/**
- * A policy to enable response decompression according to Accept-Encoding header
- * https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Accept-Encoding
- */
-function esm_policies_decompressResponsePolicy_decompressResponsePolicy() {
-    return decompressResponsePolicy_decompressResponsePolicy();
-}
-//# sourceMappingURL=decompressResponsePolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/defaultRetryPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * Name of the {@link defaultRetryPolicy}
- */
-const policies_defaultRetryPolicy_defaultRetryPolicyName = (/* unused pure expression or super */ null && (tspDefaultRetryPolicyName));
-/**
- * A policy that retries according to three strategies:
- * - When the server sends a 429 response with a Retry-After header.
- * - When there are errors in the underlying transport layer (e.g. DNS lookup failures).
- * - Or otherwise if the outgoing request fails, it will retry with an exponentially increasing delay.
- */
-function esm_policies_defaultRetryPolicy_defaultRetryPolicy(options = {}) {
-    return defaultRetryPolicy_defaultRetryPolicy(options);
-}
-//# sourceMappingURL=defaultRetryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/formDataPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * The programmatic identifier of the formDataPolicy.
- */
-const policies_formDataPolicy_formDataPolicyName = (/* unused pure expression or super */ null && (tspFormDataPolicyName));
-/**
- * A policy that encodes FormData on the request into the body.
- */
-function esm_policies_formDataPolicy_formDataPolicy() {
-    return formDataPolicy_formDataPolicy();
-}
-//# sourceMappingURL=formDataPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/proxyPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * The programmatic identifier of the proxyPolicy.
- */
-const policies_proxyPolicy_proxyPolicyName = (/* unused pure expression or super */ null && (tspProxyPolicyName));
-/**
- * This method converts a proxy url into `ProxySettings` for use with ProxyPolicy.
- * If no argument is given, it attempts to parse a proxy URL from the environment
- * variables `HTTPS_PROXY` or `HTTP_PROXY`.
- * @param proxyUrl - The url of the proxy to use. May contain authentication information.
- * @deprecated - Internally this method is no longer necessary when setting proxy information.
- */
-function policies_proxyPolicy_getDefaultProxySettings(proxyUrl) {
-    return tspGetDefaultProxySettings(proxyUrl);
-}
-/**
- * A policy that allows one to apply proxy settings to all requests.
- * If not passed static settings, they will be retrieved from the HTTPS_PROXY
- * or HTTP_PROXY environment variables.
- * @param proxySettings - ProxySettings to use on each request.
- * @param options - additional settings, for example, custom NO_PROXY patterns
- */
-function esm_policies_proxyPolicy_proxyPolicy(proxySettings, options) {
-    return proxyPolicy_proxyPolicy(proxySettings, options);
-}
-//# sourceMappingURL=proxyPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/setClientRequestIdPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-/**
- * The programmatic identifier of the setClientRequestIdPolicy.
- */
-const setClientRequestIdPolicyName = "setClientRequestIdPolicy";
-/**
- * Each PipelineRequest gets a unique id upon creation.
- * This policy passes that unique id along via an HTTP header to enable better
- * telemetry and tracing.
- * @param requestIdHeaderName - The name of the header to pass the request ID to.
- */
-function setClientRequestIdPolicy_setClientRequestIdPolicy(requestIdHeaderName = "x-ms-client-request-id") {
-    return {
-        name: setClientRequestIdPolicyName,
-        async sendRequest(request, next) {
-            if (!request.headers.has(requestIdHeaderName)) {
-                request.headers.set(requestIdHeaderName, request.requestId);
-            }
-            return next(request);
-        },
-    };
-}
-//# sourceMappingURL=setClientRequestIdPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/agentPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * Name of the Agent Policy
- */
-const policies_agentPolicy_agentPolicyName = (/* unused pure expression or super */ null && (tspAgentPolicyName));
-/**
- * Gets a pipeline policy that sets http.agent
- */
-function esm_policies_agentPolicy_agentPolicy(agent) {
-    return agentPolicy_agentPolicy(agent);
-}
-//# sourceMappingURL=agentPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/tlsPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * Name of the TLS Policy
- */
-const policies_tlsPolicy_tlsPolicyName = (/* unused pure expression or super */ null && (tspTlsPolicyName));
-/**
- * Gets a pipeline policy that adds the client certificate to the HttpClient agent for authentication.
- */
-function esm_policies_tlsPolicy_tlsPolicy(tlsSettings) {
-    return tlsPolicy_tlsPolicy(tlsSettings);
-}
-//# sourceMappingURL=tlsPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/restError.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * A custom error type for failed pipeline requests.
- */
-// eslint-disable-next-line @typescript-eslint/no-redeclare
-const dist_esm_restError_RestError = restError_RestError;
-/**
- * Typeguard for RestError
- * @param e - Something caught by a catch clause.
- */
-function dist_esm_restError_isRestError(e) {
-    return restError_isRestError(e);
-}
-//# sourceMappingURL=restError.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/tracingPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-
-
-
-
-
-/**
- * The programmatic identifier of the tracingPolicy.
- */
-const tracingPolicy_tracingPolicyName = "tracingPolicy";
-/**
- * A simple policy to create OpenTelemetry Spans for each request made by the pipeline
- * that has SpanOptions with a parent.
- * Requests made without a parent Span will not be recorded.
- * @param options - Options to configure the telemetry logged by the tracing policy.
- */
-function policies_tracingPolicy_tracingPolicy(options = {}) {
-    const userAgentPromise = esm_util_userAgent_getUserAgentValue(options.userAgentPrefix);
-    const sanitizer = new sanitizer_Sanitizer({
-        additionalAllowedQueryParameters: options.additionalAllowedQueryParameters,
-    });
-    const tracingClient = tracingPolicy_tryCreateTracingClient();
-    return {
-        name: tracingPolicy_tracingPolicyName,
-        async sendRequest(request, next) {
-            if (!tracingClient) {
-                return next(request);
-            }
-            const userAgent = await userAgentPromise;
-            const spanAttributes = {
-                "http.url": sanitizer.sanitizeUrl(request.url),
-                "http.method": request.method,
-                "http.user_agent": userAgent,
-                requestId: request.requestId,
-            };
-            if (userAgent) {
-                spanAttributes["http.user_agent"] = userAgent;
-            }
-            const { span, tracingContext } = tracingPolicy_tryCreateSpan(tracingClient, request, spanAttributes) ?? {};
-            if (!span || !tracingContext) {
-                return next(request);
-            }
-            try {
-                const response = await tracingClient.withContext(tracingContext, next, request);
-                tracingPolicy_tryProcessResponse(span, response);
-                return response;
-            }
-            catch (err) {
-                tracingPolicy_tryProcessError(span, err);
-                throw err;
-            }
-        },
-    };
-}
-function tracingPolicy_tryCreateTracingClient() {
-    try {
-        return tracingClient_createTracingClient({
-            namespace: "",
-            packageName: "@azure/core-rest-pipeline",
-            packageVersion: esm_constants_SDK_VERSION,
-        });
-    }
-    catch (e) {
-        dist_esm_log_logger.warning(`Error when creating the TracingClient: ${error_getErrorMessage(e)}`);
-        return undefined;
-    }
-}
-function tracingPolicy_tryCreateSpan(tracingClient, request, spanAttributes) {
-    try {
-        // As per spec, we do not need to differentiate between HTTP and HTTPS in span name.
-        const { span, updatedOptions } = tracingClient.startSpan(`HTTP ${request.method}`, { tracingOptions: request.tracingOptions }, {
-            spanKind: "client",
-            spanAttributes,
-        });
-        // If the span is not recording, don't do any more work.
-        if (!span.isRecording()) {
-            span.end();
-            return undefined;
-        }
-        // set headers
-        const headers = tracingClient.createRequestHeaders(updatedOptions.tracingOptions.tracingContext);
-        for (const [key, value] of Object.entries(headers)) {
-            request.headers.set(key, value);
-        }
-        return { span, tracingContext: updatedOptions.tracingOptions.tracingContext };
-    }
-    catch (e) {
-        dist_esm_log_logger.warning(`Skipping creating a tracing span due to an error: ${error_getErrorMessage(e)}`);
-        return undefined;
-    }
-}
-function tracingPolicy_tryProcessError(span, error) {
-    try {
-        span.setStatus({
-            status: "error",
-            error: esm_isError(error) ? error : undefined,
-        });
-        if (dist_esm_restError_isRestError(error) && error.statusCode) {
-            span.setAttribute("http.status_code", error.statusCode);
-        }
-        span.end();
-    }
-    catch (e) {
-        dist_esm_log_logger.warning(`Skipping tracing span processing due to an error: ${error_getErrorMessage(e)}`);
-    }
-}
-function tracingPolicy_tryProcessResponse(span, response) {
-    try {
-        span.setAttribute("http.status_code", response.status);
-        const serviceRequestId = response.headers.get("x-ms-request-id");
-        if (serviceRequestId) {
-            span.setAttribute("serviceRequestId", serviceRequestId);
-        }
-        // Per semantic conventions, only set the status to error if the status code is 4xx or 5xx.
-        // Otherwise, the status MUST remain unset.
-        // https://opentelemetry.io/docs/specs/semconv/http/http-spans/#status
-        if (response.status >= 400) {
-            span.setStatus({
-                status: "error",
-            });
-        }
-        span.end();
-    }
-    catch (e) {
-        dist_esm_log_logger.warning(`Skipping tracing span processing due to an error: ${error_getErrorMessage(e)}`);
-    }
-}
-//# sourceMappingURL=tracingPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/wrapAbortSignal.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-/**
- * Creates a native AbortSignal which reflects the state of the provided AbortSignalLike.
- * If the AbortSignalLike is already a native AbortSignal, it is returned as is.
- * @param abortSignalLike - The AbortSignalLike to wrap.
- * @returns - An object containing the native AbortSignal and an optional cleanup function. The cleanup function should be called when the AbortSignal is no longer needed.
- */
-function wrapAbortSignal_wrapAbortSignalLike(abortSignalLike) {
-    if (abortSignalLike instanceof AbortSignal) {
-        return { abortSignal: abortSignalLike };
-    }
-    if (abortSignalLike.aborted) {
-        return {
-            abortSignal: AbortSignal.abort("reason" in abortSignalLike ? abortSignalLike.reason : undefined),
-        };
-    }
-    const controller = new AbortController();
-    let needsCleanup = true;
-    function cleanup() {
-        if (needsCleanup) {
-            abortSignalLike.removeEventListener("abort", listener);
-            needsCleanup = false;
-        }
-    }
-    function listener() {
-        controller.abort("reason" in abortSignalLike ? abortSignalLike.reason : undefined);
-        cleanup();
-    }
-    abortSignalLike.addEventListener("abort", listener);
-    return { abortSignal: controller.signal, cleanup };
-}
-//# sourceMappingURL=wrapAbortSignal.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/wrapAbortSignalLikePolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-const wrapAbortSignalLikePolicyName = "wrapAbortSignalLikePolicy";
-/**
- * Policy that ensure that any AbortSignalLike is wrapped in a native AbortSignal for processing by the pipeline.
- * Since the ts-http-runtime expects a native AbortSignal, this policy is used to ensure that any AbortSignalLike is wrapped in a native AbortSignal.
- *
- * @returns - created policy
- */
-function wrapAbortSignalLikePolicy_wrapAbortSignalLikePolicy() {
-    return {
-        name: wrapAbortSignalLikePolicyName,
-        sendRequest: async (request, next) => {
-            if (!request.abortSignal) {
-                return next(request);
-            }
-            const { abortSignal, cleanup } = wrapAbortSignal_wrapAbortSignalLike(request.abortSignal);
-            request.abortSignal = abortSignal;
-            try {
-                return await next(request);
-            }
-            finally {
-                cleanup?.();
-            }
-        },
-    };
-}
-//# sourceMappingURL=wrapAbortSignalLikePolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/createPipelineFromOptions.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/**
- * Create a new pipeline with a default set of customizable policies.
- * @param options - Options to configure a custom pipeline.
- */
-function dist_esm_createPipelineFromOptions_createPipelineFromOptions(options) {
-    const pipeline = dist_esm_pipeline_createEmptyPipeline();
-    if (esm_isNodeLike) {
-        if (options.agent) {
-            pipeline.addPolicy(esm_policies_agentPolicy_agentPolicy(options.agent));
-        }
-        if (options.tlsOptions) {
-            pipeline.addPolicy(esm_policies_tlsPolicy_tlsPolicy(options.tlsOptions));
-        }
-        pipeline.addPolicy(esm_policies_proxyPolicy_proxyPolicy(options.proxyOptions));
-        pipeline.addPolicy(esm_policies_decompressResponsePolicy_decompressResponsePolicy());
-    }
-    pipeline.addPolicy(wrapAbortSignalLikePolicy_wrapAbortSignalLikePolicy());
-    pipeline.addPolicy(esm_policies_formDataPolicy_formDataPolicy(), { beforePolicies: [esm_policies_multipartPolicy_multipartPolicyName] });
-    pipeline.addPolicy(esm_policies_userAgentPolicy_userAgentPolicy(options.userAgentOptions));
-    pipeline.addPolicy(setClientRequestIdPolicy_setClientRequestIdPolicy(options.telemetryOptions?.clientRequestIdHeaderName));
-    // The multipart policy is added after policies with no phase, so that
-    // policies can be added between it and formDataPolicy to modify
-    // properties (e.g., making the boundary constant in recorded tests).
-    pipeline.addPolicy(esm_policies_multipartPolicy_multipartPolicy(), { afterPhase: "Deserialize" });
-    pipeline.addPolicy(esm_policies_defaultRetryPolicy_defaultRetryPolicy(options.retryOptions), { phase: "Retry" });
-    pipeline.addPolicy(policies_tracingPolicy_tracingPolicy({ ...options.userAgentOptions, ...options.loggingOptions }), {
-        afterPhase: "Retry",
-    });
-    if (esm_isNodeLike) {
-        // Both XHR and Fetch expect to handle redirects automatically,
-        // so only include this policy when we're in Node.
-        pipeline.addPolicy(esm_policies_redirectPolicy_redirectPolicy(options.redirectOptions), { afterPhase: "Retry" });
-    }
-    pipeline.addPolicy(esm_policies_logPolicy_logPolicy(options.loggingOptions), { afterPhase: "Sign" });
-    return pipeline;
-}
-//# sourceMappingURL=createPipelineFromOptions.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/defaultHttpClient.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-/**
- * Create the correct HttpClient for the current environment.
- */
-function dist_esm_defaultHttpClient_createDefaultHttpClient() {
-    const client = defaultHttpClient_createDefaultHttpClient();
-    return {
-        async sendRequest(request) {
-            // we wrap any AbortSignalLike here since the TypeSpec runtime expects a native AbortSignal.
-            // 99% of the time, this should be a no-op since a native AbortSignal is passed in.
-            const { abortSignal, cleanup } = request.abortSignal
-                ? wrapAbortSignal_wrapAbortSignalLike(request.abortSignal)
-                : {};
-            try {
-                request.abortSignal = abortSignal;
-                return await client.sendRequest(request);
-            }
-            finally {
-                cleanup?.();
-            }
-        },
-    };
-}
-//# sourceMappingURL=defaultHttpClient.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/httpHeaders.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * Creates an object that satisfies the `HttpHeaders` interface.
- * @param rawHeaders - A simple object representing initial headers
- */
-function dist_esm_httpHeaders_createHttpHeaders(rawHeaders) {
-    return httpHeaders_createHttpHeaders(rawHeaders);
-}
-//# sourceMappingURL=httpHeaders.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/pipelineRequest.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * Creates a new pipeline request with the given options.
- * This method is to allow for the easy setting of default values and not required.
- * @param options - The options to create the request with.
- */
-function dist_esm_pipelineRequest_createPipelineRequest(options) {
-    // Cast required due to difference between ts-http-runtime requiring AbortSignal while core-rest-pipeline allows
-    // the more generic AbortSignalLike. The wrapAbortSignalLike pipeline policy will take care of ensuring that any AbortSignalLike in the request
-    // is converted into a true AbortSignal.
-    return pipelineRequest_createPipelineRequest(options);
-}
-//# sourceMappingURL=pipelineRequest.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/exponentialRetryPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * The programmatic identifier of the exponentialRetryPolicy.
- */
-const policies_exponentialRetryPolicy_exponentialRetryPolicyName = (/* unused pure expression or super */ null && (tspExponentialRetryPolicyName));
-/**
- * A policy that attempts to retry requests while introducing an exponentially increasing delay.
- * @param options - Options that configure retry logic.
- */
-function policies_exponentialRetryPolicy_exponentialRetryPolicy(options = {}) {
-    return tspExponentialRetryPolicy(options);
-}
-//# sourceMappingURL=exponentialRetryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/systemErrorRetryPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * Name of the {@link systemErrorRetryPolicy}
- */
-const policies_systemErrorRetryPolicy_systemErrorRetryPolicyName = (/* unused pure expression or super */ null && (tspSystemErrorRetryPolicyName));
-/**
- * A retry policy that specifically seeks to handle errors in the
- * underlying transport layer (e.g. DNS lookup failures) rather than
- * retryable error codes from the server itself.
- * @param options - Options that customize the policy.
- */
-function policies_systemErrorRetryPolicy_systemErrorRetryPolicy(options = {}) {
-    return tspSystemErrorRetryPolicy(options);
-}
-//# sourceMappingURL=systemErrorRetryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/throttlingRetryPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/**
- * Name of the {@link throttlingRetryPolicy}
- */
-const policies_throttlingRetryPolicy_throttlingRetryPolicyName = (/* unused pure expression or super */ null && (tspThrottlingRetryPolicyName));
-/**
- * A policy that retries when the server sends a 429 response with a Retry-After header.
- *
- * To learn more, please refer to
- * https://learn.microsoft.com/azure/azure-resource-manager/resource-manager-request-limits,
- * https://learn.microsoft.com/azure/azure-subscription-service-limits and
- * https://learn.microsoft.com/azure/virtual-machines/troubleshooting/troubleshooting-throttling-errors
- *
- * @param options - Options that configure retry logic.
- */
-function policies_throttlingRetryPolicy_throttlingRetryPolicy(options = {}) {
-    return tspThrottlingRetryPolicy(options);
-}
-//# sourceMappingURL=throttlingRetryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/retryPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-
-const policies_retryPolicy_retryPolicyLogger = esm_createClientLogger("core-rest-pipeline retryPolicy");
-/**
- * retryPolicy is a generic policy to enable retrying requests when certain conditions are met
- */
-function esm_policies_retryPolicy_retryPolicy(strategies, options = { maxRetries: DEFAULT_RETRY_POLICY_COUNT }) {
-    // Cast is required since the TSP runtime retry strategy type is slightly different
-    // very deep down (using real AbortSignal vs. AbortSignalLike in RestError).
-    // In practice the difference doesn't actually matter.
-    return tspRetryPolicy(strategies, {
-        logger: policies_retryPolicy_retryPolicyLogger,
-        ...options,
-    });
-}
-//# sourceMappingURL=retryPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/util/tokenCycler.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-// Default options for the cycler if none are provided
-const tokenCycler_DEFAULT_CYCLER_OPTIONS = {
-    forcedRefreshWindowInMs: 1000, // Force waiting for a refresh 1s before the token expires
-    retryIntervalInMs: 3000, // Allow refresh attempts every 3s
-    refreshWindowInMs: 1000 * 60 * 2, // Start refreshing 2m before expiry
-};
-/**
- * Converts an an unreliable access token getter (which may resolve with null)
- * into an AccessTokenGetter by retrying the unreliable getter in a regular
- * interval.
- *
- * @param getAccessToken - A function that produces a promise of an access token that may fail by returning null.
- * @param retryIntervalInMs - The time (in milliseconds) to wait between retry attempts.
- * @param refreshTimeout - The timestamp after which the refresh attempt will fail, throwing an exception.
- * @returns - A promise that, if it resolves, will resolve with an access token.
- */
-async function tokenCycler_beginRefresh(getAccessToken, retryIntervalInMs, refreshTimeout) {
-    // This wrapper handles exceptions gracefully as long as we haven't exceeded
-    // the timeout.
-    async function tryGetAccessToken() {
-        if (Date.now() < refreshTimeout) {
-            try {
-                return await getAccessToken();
-            }
-            catch {
-                return null;
-            }
-        }
-        else {
-            const finalToken = await getAccessToken();
-            // Timeout is up, so throw if it's still null
-            if (finalToken === null) {
-                throw new Error("Failed to refresh access token.");
-            }
-            return finalToken;
-        }
-    }
-    let token = await tryGetAccessToken();
-    while (token === null) {
-        await delay_delay(retryIntervalInMs);
-        token = await tryGetAccessToken();
-    }
-    return token;
-}
-/**
- * Creates a token cycler from a credential, scopes, and optional settings.
- *
- * A token cycler represents a way to reliably retrieve a valid access token
- * from a TokenCredential. It will handle initializing the token, refreshing it
- * when it nears expiration, and synchronizes refresh attempts to avoid
- * concurrency hazards.
- *
- * @param credential - the underlying TokenCredential that provides the access
- * token
- * @param tokenCyclerOptions - optionally override default settings for the cycler
- *
- * @returns - a function that reliably produces a valid access token
- */
-function util_tokenCycler_createTokenCycler(credential, tokenCyclerOptions) {
-    let refreshWorker = null;
-    let token = null;
-    let tenantId;
-    const options = {
-        ...tokenCycler_DEFAULT_CYCLER_OPTIONS,
-        ...tokenCyclerOptions,
-    };
-    /**
-     * This little holder defines several predicates that we use to construct
-     * the rules of refreshing the token.
-     */
-    const cycler = {
-        /**
-         * Produces true if a refresh job is currently in progress.
-         */
-        get isRefreshing() {
-            return refreshWorker !== null;
-        },
-        /**
-         * Produces true if the cycler SHOULD refresh (we are within the refresh
-         * window and not already refreshing)
-         */
-        get shouldRefresh() {
-            if (token === null) {
-                return true;
-            }
-            if (cycler.isRefreshing) {
-                return false;
-            }
-            if (token.refreshAfterTimestamp && token.refreshAfterTimestamp < Date.now()) {
-                return true;
-            }
-            return token.expiresOnTimestamp - options.refreshWindowInMs < Date.now();
-        },
-        /**
-         * Produces true if the cycler MUST refresh (null or nearly-expired
-         * token).
-         */
-        get mustRefresh() {
-            return (token === null || token.expiresOnTimestamp - options.forcedRefreshWindowInMs < Date.now());
-        },
-    };
-    /**
-     * Starts a refresh job or returns the existing job if one is already
-     * running.
-     */
-    function refresh(scopes, getTokenOptions) {
-        if (!cycler.isRefreshing) {
-            // We bind `scopes` here to avoid passing it around a lot
-            const tryGetAccessToken = () => credential.getToken(scopes, getTokenOptions);
-            // Take advantage of promise chaining to insert an assignment to `token`
-            // before the refresh can be considered done.
-            refreshWorker = tokenCycler_beginRefresh(tryGetAccessToken, options.retryIntervalInMs, 
-            // If we don't have a token, then we should timeout immediately
-            token?.expiresOnTimestamp ?? Date.now())
-                .then((_token) => {
-                refreshWorker = null;
-                token = _token;
-                tenantId = getTokenOptions.tenantId;
-                return token;
-            })
-                .catch((reason) => {
-                // We also should reset the refresher if we enter a failed state.  All
-                // existing awaiters will throw, but subsequent requests will start a
-                // new retry chain.
-                refreshWorker = null;
-                token = null;
-                tenantId = undefined;
-                throw reason;
-            });
-        }
-        return refreshWorker;
-    }
-    return async (scopes, tokenOptions) => {
-        //
-        // Simple rules:
-        // - If we MUST refresh, then return the refresh task, blocking
-        //   the pipeline until a token is available.
-        // - If we SHOULD refresh, then run refresh but don't return it
-        //   (we can still use the cached token).
-        // - Return the token, since it's fine if we didn't return in
-        //   step 1.
-        //
-        const hasClaimChallenge = Boolean(tokenOptions.claims);
-        const tenantIdChanged = tenantId !== tokenOptions.tenantId;
-        if (hasClaimChallenge) {
-            // If we've received a claim, we know the existing token isn't valid
-            // We want to clear it so that that refresh worker won't use the old expiration time as a timeout
-            token = null;
-        }
-        // If the tenantId passed in token options is different to the one we have
-        // Or if we are in claim challenge and the token was rejected and a new access token need to be issued, we need to
-        // refresh the token with the new tenantId or token.
-        const mustRefresh = tenantIdChanged || hasClaimChallenge || cycler.mustRefresh;
-        if (mustRefresh) {
-            return refresh(scopes, tokenOptions);
-        }
-        if (cycler.shouldRefresh) {
-            refresh(scopes, tokenOptions);
-        }
-        return token;
-    };
-}
-//# sourceMappingURL=tokenCycler.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/bearerTokenAuthenticationPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-
-/**
- * The programmatic identifier of the bearerTokenAuthenticationPolicy.
- */
-const bearerTokenAuthenticationPolicy_bearerTokenAuthenticationPolicyName = "bearerTokenAuthenticationPolicy";
-/**
- * Try to send the given request.
- *
- * When a response is received, returns a tuple of the response received and, if the response was received
- * inside a thrown RestError, the RestError that was thrown.
- *
- * Otherwise, if an error was thrown while sending the request that did not provide an underlying response, it
- * will be rethrown.
- */
-async function bearerTokenAuthenticationPolicy_trySendRequest(request, next) {
-    try {
-        return [await next(request), undefined];
-    }
-    catch (e) {
-        if (dist_esm_restError_isRestError(e) && e.response) {
-            return [e.response, e];
-        }
-        else {
-            throw e;
-        }
-    }
-}
-/**
- * Default authorize request handler
- */
-async function bearerTokenAuthenticationPolicy_defaultAuthorizeRequest(options) {
-    const { scopes, getAccessToken, request } = options;
-    // Enable CAE true by default
-    const getTokenOptions = {
-        abortSignal: request.abortSignal,
-        tracingOptions: request.tracingOptions,
-        enableCae: true,
-    };
-    const accessToken = await getAccessToken(scopes, getTokenOptions);
-    if (accessToken) {
-        options.request.headers.set("Authorization", `Bearer ${accessToken.token}`);
-    }
-}
-/**
- * We will retrieve the challenge only if the response status code was 401,
- * and if the response contained the header "WWW-Authenticate" with a non-empty value.
- */
-function bearerTokenAuthenticationPolicy_isChallengeResponse(response) {
-    return response.status === 401 && response.headers.has("WWW-Authenticate");
-}
-/**
- * Re-authorize the request for CAE challenge.
- * The response containing the challenge is `options.response`.
- * If this method returns true, the underlying request will be sent once again.
- */
-async function bearerTokenAuthenticationPolicy_authorizeRequestOnCaeChallenge(onChallengeOptions, caeClaims) {
-    const { scopes } = onChallengeOptions;
-    const accessToken = await onChallengeOptions.getAccessToken(scopes, {
-        enableCae: true,
-        claims: caeClaims,
-    });
-    if (!accessToken) {
-        return false;
-    }
-    onChallengeOptions.request.headers.set("Authorization", `${accessToken.tokenType ?? "Bearer"} ${accessToken.token}`);
-    return true;
-}
-/**
- * A policy that can request a token from a TokenCredential implementation and
- * then apply it to the Authorization header of a request as a Bearer token.
- */
-function bearerTokenAuthenticationPolicy_bearerTokenAuthenticationPolicy(options) {
-    const { credential, scopes, challengeCallbacks } = options;
-    const logger = options.logger || dist_esm_log_logger;
-    const callbacks = {
-        authorizeRequest: challengeCallbacks?.authorizeRequest?.bind(challengeCallbacks) ?? bearerTokenAuthenticationPolicy_defaultAuthorizeRequest,
-        authorizeRequestOnChallenge: challengeCallbacks?.authorizeRequestOnChallenge?.bind(challengeCallbacks),
-    };
-    // This function encapsulates the entire process of reliably retrieving the token
-    // The options are left out of the public API until there's demand to configure this.
-    // Remember to extend `BearerTokenAuthenticationPolicyOptions` with `TokenCyclerOptions`
-    // in order to pass through the `options` object.
-    const getAccessToken = credential
-        ? util_tokenCycler_createTokenCycler(credential /* , options */)
-        : () => Promise.resolve(null);
-    return {
-        name: bearerTokenAuthenticationPolicy_bearerTokenAuthenticationPolicyName,
-        /**
-         * If there's no challenge parameter:
-         * - It will try to retrieve the token using the cache, or the credential's getToken.
-         * - Then it will try the next policy with or without the retrieved token.
-         *
-         * It uses the challenge parameters to:
-         * - Skip a first attempt to get the token from the credential if there's no cached token,
-         *   since it expects the token to be retrievable only after the challenge.
-         * - Prepare the outgoing request if the `prepareRequest` method has been provided.
-         * - Send an initial request to receive the challenge if it fails.
-         * - Process a challenge if the response contains it.
-         * - Retrieve a token with the challenge information, then re-send the request.
-         */
-        async sendRequest(request, next) {
-            if (!request.url.toLowerCase().startsWith("https://")) {
-                throw new Error("Bearer token authentication is not permitted for non-TLS protected (non-https) URLs.");
-            }
-            await callbacks.authorizeRequest({
-                scopes: Array.isArray(scopes) ? scopes : [scopes],
-                request,
-                getAccessToken,
-                logger,
-            });
-            let response;
-            let error;
-            let shouldSendRequest;
-            [response, error] = await bearerTokenAuthenticationPolicy_trySendRequest(request, next);
-            if (bearerTokenAuthenticationPolicy_isChallengeResponse(response)) {
-                let claims = bearerTokenAuthenticationPolicy_getCaeChallengeClaims(response.headers.get("WWW-Authenticate"));
-                // Handle CAE by default when receive CAE claim
-                if (claims) {
-                    let parsedClaim;
-                    // Return the response immediately if claims is not a valid base64 encoded string
-                    try {
-                        parsedClaim = atob(claims);
-                    }
-                    catch (e) {
-                        logger.warning(`The WWW-Authenticate header contains "claims" that cannot be parsed. Unable to perform the Continuous Access Evaluation authentication flow. Unparsable claims: ${claims}`);
-                        return response;
-                    }
-                    shouldSendRequest = await bearerTokenAuthenticationPolicy_authorizeRequestOnCaeChallenge({
-                        scopes: Array.isArray(scopes) ? scopes : [scopes],
-                        response,
-                        request,
-                        getAccessToken,
-                        logger,
-                    }, parsedClaim);
-                    // Send updated request and handle response for RestError
-                    if (shouldSendRequest) {
-                        [response, error] = await bearerTokenAuthenticationPolicy_trySendRequest(request, next);
-                    }
-                }
-                else if (callbacks.authorizeRequestOnChallenge) {
-                    // Handle custom challenges when client provides custom callback
-                    shouldSendRequest = await callbacks.authorizeRequestOnChallenge({
-                        scopes: Array.isArray(scopes) ? scopes : [scopes],
-                        request,
-                        response,
-                        getAccessToken,
-                        logger,
-                    });
-                    // Send updated request and handle response for RestError
-                    if (shouldSendRequest) {
-                        [response, error] = await bearerTokenAuthenticationPolicy_trySendRequest(request, next);
-                    }
-                    // If we get another CAE Claim, we will handle it by default and return whatever value we receive for this
-                    if (bearerTokenAuthenticationPolicy_isChallengeResponse(response)) {
-                        claims = bearerTokenAuthenticationPolicy_getCaeChallengeClaims(response.headers.get("WWW-Authenticate") ?? "");
-                        if (claims) {
-                            let parsedClaim;
-                            try {
-                                parsedClaim = atob(claims);
-                            }
-                            catch (e) {
-                                logger.warning(`The WWW-Authenticate header contains "claims" that cannot be parsed. Unable to perform the Continuous Access Evaluation authentication flow. Unparsable claims: ${claims}`);
-                                return response;
-                            }
-                            shouldSendRequest = await bearerTokenAuthenticationPolicy_authorizeRequestOnCaeChallenge({
-                                scopes: Array.isArray(scopes) ? scopes : [scopes],
-                                response,
-                                request,
-                                getAccessToken,
-                                logger,
-                            }, parsedClaim);
-                            // Send updated request and handle response for RestError
-                            if (shouldSendRequest) {
-                                [response, error] = await bearerTokenAuthenticationPolicy_trySendRequest(request, next);
-                            }
-                        }
-                    }
-                }
-            }
-            if (error) {
-                throw error;
-            }
-            else {
-                return response;
-            }
-        },
-    };
-}
-/**
- * Converts: `Bearer a="b", c="d", Pop e="f", g="h"`.
- * Into: `[ { scheme: 'Bearer', params: { a: 'b', c: 'd' } }, { scheme: 'Pop', params: { e: 'f', g: 'h' } } ]`.
- *
- * @internal
- */
-function bearerTokenAuthenticationPolicy_parseChallenges(challenges) {
-    // Challenge regex seperates the string to individual challenges with different schemes in the format `Scheme a="b", c=d`
-    // The challenge regex captures parameteres with either quotes values or unquoted values
-    const challengeRegex = /(\w+)\s+((?:\w+=(?:"[^"]*"|[^,]*),?\s*)+)/g;
-    // Parameter regex captures the claims group removed from the scheme in the format `a="b"` and `c="d"`
-    // CAE challenge always have quoted parameters. For more reference, https://learn.microsoft.com/entra/identity-platform/claims-challenge
-    const paramRegex = /(\w+)="([^"]*)"/g;
-    const parsedChallenges = [];
-    let match;
-    // Iterate over each challenge match
-    while ((match = challengeRegex.exec(challenges)) !== null) {
-        const scheme = match[1];
-        const paramsString = match[2];
-        const params = {};
-        let paramMatch;
-        // Iterate over each parameter match
-        while ((paramMatch = paramRegex.exec(paramsString)) !== null) {
-            params[paramMatch[1]] = paramMatch[2];
-        }
-        parsedChallenges.push({ scheme, params });
-    }
-    return parsedChallenges;
-}
-/**
- * Parse a pipeline response and look for a CAE challenge with "Bearer" scheme
- * Return the value in the header without parsing the challenge
- * @internal
- */
-function bearerTokenAuthenticationPolicy_getCaeChallengeClaims(challenges) {
-    if (!challenges) {
-        return;
-    }
-    // Find all challenges present in the header
-    const parsedChallenges = bearerTokenAuthenticationPolicy_parseChallenges(challenges);
-    return parsedChallenges.find((x) => x.scheme === "Bearer" && x.params.claims && x.params.error === "insufficient_claims")?.params.claims;
-}
-//# sourceMappingURL=bearerTokenAuthenticationPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/policies/auxiliaryAuthenticationHeaderPolicy.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-/**
- * The programmatic identifier of the auxiliaryAuthenticationHeaderPolicy.
- */
-const auxiliaryAuthenticationHeaderPolicy_auxiliaryAuthenticationHeaderPolicyName = "auxiliaryAuthenticationHeaderPolicy";
-const auxiliaryAuthenticationHeaderPolicy_AUTHORIZATION_AUXILIARY_HEADER = "x-ms-authorization-auxiliary";
-async function auxiliaryAuthenticationHeaderPolicy_sendAuthorizeRequest(options) {
-    const { scopes, getAccessToken, request } = options;
-    const getTokenOptions = {
-        abortSignal: request.abortSignal,
-        tracingOptions: request.tracingOptions,
-    };
-    return (await getAccessToken(scopes, getTokenOptions))?.token ?? "";
-}
-/**
- * A policy for external tokens to `x-ms-authorization-auxiliary` header.
- * This header will be used when creating a cross-tenant application we may need to handle authentication requests
- * for resources that are in different tenants.
- * You could see [ARM docs](https://learn.microsoft.com/azure/azure-resource-manager/management/authenticate-multi-tenant) for a rundown of how this feature works
- */
-function auxiliaryAuthenticationHeaderPolicy_auxiliaryAuthenticationHeaderPolicy(options) {
-    const { credentials, scopes } = options;
-    const logger = options.logger || coreLogger;
-    const tokenCyclerMap = new WeakMap();
-    return {
-        name: auxiliaryAuthenticationHeaderPolicy_auxiliaryAuthenticationHeaderPolicyName,
-        async sendRequest(request, next) {
-            if (!request.url.toLowerCase().startsWith("https://")) {
-                throw new Error("Bearer token authentication for auxiliary header is not permitted for non-TLS protected (non-https) URLs.");
-            }
-            if (!credentials || credentials.length === 0) {
-                logger.info(`${auxiliaryAuthenticationHeaderPolicy_auxiliaryAuthenticationHeaderPolicyName} header will not be set due to empty credentials.`);
-                return next(request);
-            }
-            const tokenPromises = [];
-            for (const credential of credentials) {
-                let getAccessToken = tokenCyclerMap.get(credential);
-                if (!getAccessToken) {
-                    getAccessToken = createTokenCycler(credential);
-                    tokenCyclerMap.set(credential, getAccessToken);
-                }
-                tokenPromises.push(auxiliaryAuthenticationHeaderPolicy_sendAuthorizeRequest({
-                    scopes: Array.isArray(scopes) ? scopes : [scopes],
-                    request,
-                    getAccessToken,
-                    logger,
-                }));
-            }
-            const auxiliaryTokens = (await Promise.all(tokenPromises)).filter((token) => Boolean(token));
-            if (auxiliaryTokens.length === 0) {
-                logger.warning(`None of the auxiliary tokens are valid. ${auxiliaryAuthenticationHeaderPolicy_AUTHORIZATION_AUXILIARY_HEADER} header will not be set.`);
-                return next(request);
-            }
-            request.headers.set(auxiliaryAuthenticationHeaderPolicy_AUTHORIZATION_AUXILIARY_HEADER, auxiliaryTokens.map((token) => `Bearer ${token}`).join(", "));
-            return next(request);
-        },
-    };
-}
-//# sourceMappingURL=auxiliaryAuthenticationHeaderPolicy.js.map
-;// CONCATENATED MODULE: ./node_modules/@azure/core-rest-pipeline/dist/esm/index.js
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-//# sourceMappingURL=index.js.map
 ;// CONCATENATED MODULE: ./node_modules/@azure/core-client/dist/esm/base64.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
@@ -53006,7 +51878,7 @@ async function deserializeResponseBody(jsonContentTypes, xmlContentTypes, respon
                 parsedResponse.parsedBody = operationSpec.serializer.deserialize(responseSpec.bodyMapper, valueToDeserialize, "operationRes.parsedBody", options);
             }
             catch (deserializeError) {
-                const restError = new dist_esm_restError_RestError(`Error ${deserializeError} occurred in deserializing the responseBody - ${parsedResponse.bodyAsText}`, {
+                const restError = new esm_restError_RestError(`Error ${deserializeError} occurred in deserializing the responseBody - ${parsedResponse.bodyAsText}`, {
                     statusCode: parsedResponse.status,
                     request: parsedResponse.request,
                     response: parsedResponse,
@@ -53048,7 +51920,7 @@ function handleErrorResponse(parsedResponse, operationSpec, responseSpec, option
     const initialErrorMessage = parsedResponse.request.streamResponseStatusCodes?.has(parsedResponse.status)
         ? `Unexpected status code: ${parsedResponse.status}`
         : parsedResponse.bodyAsText;
-    const error = new dist_esm_restError_RestError(initialErrorMessage, {
+    const error = new esm_restError_RestError(initialErrorMessage, {
         statusCode: parsedResponse.status,
         request: parsedResponse.request,
         response: parsedResponse,
@@ -53124,8 +51996,8 @@ async function parse(jsonContentTypes, xmlContentTypes, operationResponse, opts,
         }
         catch (err) {
             const msg = `Error "${err}" occurred while parsing the response body - ${operationResponse.bodyAsText}.`;
-            const errCode = err.code || dist_esm_restError_RestError.PARSE_ERROR;
-            const e = new dist_esm_restError_RestError(msg, {
+            const errCode = err.code || esm_restError_RestError.PARSE_ERROR;
+            const e = new esm_restError_RestError(msg, {
                 code: errCode,
                 statusCode: operationResponse.status,
                 request: operationResponse.request,
@@ -53341,9 +52213,9 @@ function prepareXMLRootList(obj, elementName, xmlNamespaceKey, xmlNamespace) {
  * @param options - Options to customize the created pipeline.
  */
 function createClientPipeline(options = {}) {
-    const pipeline = dist_esm_createPipelineFromOptions_createPipelineFromOptions(options ?? {});
+    const pipeline = esm_createPipelineFromOptions_createPipelineFromOptions(options ?? {});
     if (options.credentialOptions) {
-        pipeline.addPolicy(bearerTokenAuthenticationPolicy_bearerTokenAuthenticationPolicy({
+        pipeline.addPolicy(bearerTokenAuthenticationPolicy({
             credential: options.credentialOptions.credential,
             scopes: options.credentialOptions.credentialScopes,
         }));
@@ -53362,7 +52234,7 @@ function createClientPipeline(options = {}) {
 let httpClientCache_cachedHttpClient;
 function getCachedDefaultHttpClient() {
     if (!httpClientCache_cachedHttpClient) {
-        httpClientCache_cachedHttpClient = dist_esm_defaultHttpClient_createDefaultHttpClient();
+        httpClientCache_cachedHttpClient = esm_defaultHttpClient_createDefaultHttpClient();
     }
     return httpClientCache_cachedHttpClient;
 }
@@ -53606,7 +52478,7 @@ function appendQueryParams(url, queryParams, sequenceParams, noOverwrite = false
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-const core_client_dist_esm_log_logger = esm_createClientLogger("core-client");
+const dist_esm_log_logger = esm_createClientLogger("core-client");
 //# sourceMappingURL=log.js.map
 ;// CONCATENATED MODULE: ./node_modules/@azure/core-client/dist/esm/serviceClient.js
 // Copyright (c) Microsoft Corporation.
@@ -53653,7 +52525,7 @@ class ServiceClient {
         this._requestContentType = options.requestContentType;
         this._endpoint = options.endpoint ?? options.baseUri;
         if (options.baseUri) {
-            core_client_dist_esm_log_logger.warning("The baseUri option for SDK Clients has been deprecated, please use endpoint instead.");
+            dist_esm_log_logger.warning("The baseUri option for SDK Clients has been deprecated, please use endpoint instead.");
         }
         this._allowInsecureConnection = options.allowInsecureConnection;
         this._httpClient = options.httpClient || getCachedDefaultHttpClient();
@@ -53690,7 +52562,7 @@ class ServiceClient {
         // so we have to pass `this` below in order to search these properties if they're
         // not part of OperationArguments
         const url = getRequestUrl(endpoint, operationSpec, operationArguments, this);
-        const request = dist_esm_pipelineRequest_createPipelineRequest({
+        const request = esm_pipelineRequest_createPipelineRequest({
             url,
         });
         request.method = operationSpec.httpMethod;
@@ -54013,13 +52885,13 @@ const passThroughProps = new Set([
 function toPipelineRequest(webResource, options = {}) {
     const compatWebResource = webResource;
     const request = compatWebResource[util_originalRequestSymbol];
-    const headers = dist_esm_httpHeaders_createHttpHeaders(webResource.headers.toJson({ preserveCase: true }));
+    const headers = esm_httpHeaders_createHttpHeaders(webResource.headers.toJson({ preserveCase: true }));
     if (request) {
         request.headers = headers;
         return request;
     }
     else {
-        const newRequest = dist_esm_pipelineRequest_createPipelineRequest({
+        const newRequest = esm_pipelineRequest_createPipelineRequest({
             url: webResource.url,
             method: webResource.method,
             headers,
@@ -54299,7 +53171,7 @@ function toCompatResponse(response, options) {
 function response_toPipelineResponse(compatResponse) {
     const extendedCompatResponse = compatResponse;
     const response = extendedCompatResponse[originalResponse];
-    const headers = dist_esm_httpHeaders_createHttpHeaders(compatResponse.headers.toJson({ preserveCase: true }));
+    const headers = esm_httpHeaders_createHttpHeaders(compatResponse.headers.toJson({ preserveCase: true }));
     if (response) {
         response.headers = headers;
         return response;
@@ -54332,7 +53204,7 @@ class ExtendedServiceClient extends ServiceClient {
         }
         if (options.redirectOptions?.handleRedirects === false) {
             this.pipeline.removePolicy({
-                name: policies_redirectPolicy_redirectPolicyName,
+                name: redirectPolicy_redirectPolicyName,
             });
         }
     }
@@ -62572,6 +61444,7 @@ function isLeafTag(obj, options) {
   return false;
 }
 ;// CONCATENATED MODULE: ./node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
+/* global Uint8Array */
 
 
 
@@ -62592,7 +61465,12 @@ class XMLParser {
      */
     parse(xmlData, validationOption) {
         if (typeof xmlData !== "string" && xmlData.toString) {
-            xmlData = xmlData.toString();
+            if (xmlData instanceof Uint8Array &&
+                !(typeof Buffer !== "undefined" && Buffer.isBuffer(xmlData))) {
+                xmlData = new TextDecoder("utf-8", { ignoreBOM: true }).decode(xmlData);
+            } else {
+                xmlData = xmlData.toString();
+            }
         } else if (typeof xmlData !== "string") {
             throw new Error("XML data is accepted in String or Bytes[] form.")
         }
@@ -62734,7 +61612,7 @@ async function parseXML(str, opts = {}) {
     return parsedXml;
 }
 //# sourceMappingURL=xml.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/log.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/log.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -66680,6 +65558,1298 @@ class StructuredMessageDecodingStream extends external_node_stream_.Readable {
     }
 }
 //# sourceMappingURL=StructuredMessageDecodingStream.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/pipeline.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * Creates a totally empty pipeline.
+ * Useful for testing or creating a custom one.
+ */
+function dist_esm_pipeline_createEmptyPipeline() {
+    return tspCreateEmptyPipeline();
+}
+//# sourceMappingURL=pipeline.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/log.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+const core_rest_pipeline_dist_esm_log_logger = esm_createClientLogger("core-rest-pipeline");
+//# sourceMappingURL=log.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/logPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+/**
+ * The programmatic identifier of the logPolicy.
+ */
+const policies_logPolicy_logPolicyName = (/* unused pure expression or super */ null && (tspLogPolicyName));
+/**
+ * A policy that logs all requests and responses.
+ * @param options - Options to configure logPolicy.
+ */
+function esm_policies_logPolicy_logPolicy(options = {}) {
+    return tspLogPolicy({
+        logger: coreLogger.info,
+        ...options,
+    });
+}
+//# sourceMappingURL=logPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/redirectPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * The programmatic identifier of the redirectPolicy.
+ */
+const policies_redirectPolicy_redirectPolicyName = (/* unused pure expression or super */ null && (tspRedirectPolicyName));
+/**
+ * A policy to follow Location headers from the server in order
+ * to support server-side redirection.
+ * In the browser, this policy is not used.
+ * @param options - Options to control policy behavior.
+ */
+function esm_policies_redirectPolicy_redirectPolicy(options = {}) {
+    return tspRedirectPolicy(options);
+}
+//# sourceMappingURL=redirectPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/util/userAgentPlatform.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+/**
+ * @internal
+ */
+function util_userAgentPlatform_getHeaderName() {
+    return "User-Agent";
+}
+/**
+ * @internal
+ */
+async function esm_util_userAgentPlatform_setPlatformSpecificData(map) {
+    if (process && process.versions) {
+        const osInfo = `${os.type()} ${os.release()}; ${os.arch()}`;
+        if (process.versions.bun) {
+            map.set("Bun", `${process.versions.bun} (${osInfo})`);
+        }
+        else if (process.versions.deno) {
+            map.set("Deno", `${process.versions.deno} (${osInfo})`);
+        }
+        else if (process.versions.node) {
+            map.set("Node", `${process.versions.node} (${osInfo})`);
+        }
+    }
+}
+//# sourceMappingURL=userAgentPlatform.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/util/userAgent.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+function util_userAgent_getUserAgentString(telemetryInfo) {
+    const parts = [];
+    for (const [key, value] of telemetryInfo) {
+        const token = value ? `${key}/${value}` : key;
+        parts.push(token);
+    }
+    return parts.join(" ");
+}
+/**
+ * @internal
+ */
+function util_userAgent_getUserAgentHeaderName() {
+    return util_userAgentPlatform_getHeaderName();
+}
+/**
+ * @internal
+ */
+async function esm_util_userAgent_getUserAgentValue(prefix) {
+    const runtimeInfo = new Map();
+    runtimeInfo.set("core-rest-pipeline", SDK_VERSION);
+    await setPlatformSpecificData(runtimeInfo);
+    const defaultAgent = util_userAgent_getUserAgentString(runtimeInfo);
+    const userAgentValue = prefix ? `${prefix} ${defaultAgent}` : defaultAgent;
+    return userAgentValue;
+}
+//# sourceMappingURL=userAgent.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/userAgentPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+const policies_userAgentPolicy_UserAgentHeaderName = util_userAgent_getUserAgentHeaderName();
+/**
+ * The programmatic identifier of the userAgentPolicy.
+ */
+const policies_userAgentPolicy_userAgentPolicyName = "userAgentPolicy";
+/**
+ * A policy that sets the User-Agent header (or equivalent) to reflect
+ * the library version.
+ * @param options - Options to customize the user agent value.
+ */
+function esm_policies_userAgentPolicy_userAgentPolicy(options = {}) {
+    const userAgentValue = getUserAgentValue(options.userAgentPrefix);
+    return {
+        name: policies_userAgentPolicy_userAgentPolicyName,
+        async sendRequest(request, next) {
+            if (!request.headers.has(policies_userAgentPolicy_UserAgentHeaderName)) {
+                request.headers.set(policies_userAgentPolicy_UserAgentHeaderName, await userAgentValue);
+            }
+            return next(request);
+        },
+    };
+}
+//# sourceMappingURL=userAgentPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/util/createFile.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * Create an object that implements the File interface. This object is intended to be
+ * passed into RequestBodyType.formData, and is not guaranteed to work as expected in
+ * other situations.
+ *
+ * Use this function to create a File object for use in RequestBodyType.formData in environments
+ * where the global File object is unavailable.
+ *
+ * @param content - the content of the file as a Uint8Array in memory.
+ * @param name - the name of the file.
+ * @param options - optional metadata about the file, e.g. file name, file size, MIME type.
+ */
+function createFile_createFile(content, name, options = {}) {
+    return createRawFile(content, name, options);
+}
+//# sourceMappingURL=createFile.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/util/file.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+function util_file_isNodeReadableStream(x) {
+    return typeof x === "object" && x !== null && "pipe" in x && typeof x.pipe === "function";
+}
+const file_unimplementedMethods = {
+    arrayBuffer: () => {
+        throw new Error("Not implemented");
+    },
+    bytes: () => {
+        throw new Error("Not implemented");
+    },
+    slice: () => {
+        throw new Error("Not implemented");
+    },
+    text: () => {
+        throw new Error("Not implemented");
+    },
+};
+/**
+ * Private symbol used as key on objects created using createFile containing the
+ * original source of the file object.
+ *
+ * This is used in Node to access the original Node stream without using Blob#stream, which
+ * returns a web stream. This is done to avoid a couple of bugs to do with Blob#stream and
+ * Readable#to/fromWeb in Node versions we support:
+ * - https://github.com/nodejs/node/issues/42694 (fixed in Node 18.14)
+ * - https://github.com/nodejs/node/issues/48916 (fixed in Node 20.6)
+ *
+ * Once these versions are no longer supported, we may be able to stop doing this.
+ *
+ * @internal
+ */
+const file_rawContent = Symbol("rawContent");
+/**
+ * Type guard to check if a given object is a blob-like object with a raw content property.
+ */
+function util_file_hasRawContent(x) {
+    return typeof x[file_rawContent] === "function";
+}
+/**
+ * Extract the raw content from a given blob-like object. If the input was created using createFile
+ * or createFileFromStream, the exact content passed into createFile/createFileFromStream will be used.
+ * For true instances of Blob and File, returns the actual blob.
+ *
+ * @internal
+ */
+function util_file_getRawContent(blob) {
+    if (util_file_hasRawContent(blob)) {
+        return blob[file_rawContent]();
+    }
+    else {
+        return blob;
+    }
+}
+/**
+ * @internal
+ *
+ * Creates a File-like object tagged with rawContent for efficient streaming access.
+ * Used by the Node createFile to avoid Blob#stream() bugs.
+ */
+function file_createRawFile(content, name, options = {}) {
+    return {
+        ...file_unimplementedMethods,
+        type: options.type ?? "",
+        lastModified: options.lastModified ?? new Date().getTime(),
+        webkitRelativePath: options.webkitRelativePath ?? "",
+        size: content.byteLength,
+        name,
+        arrayBuffer: async () => file_toArrayBuffer(content).buffer,
+        stream: () => new Blob([file_toArrayBuffer(content)]).stream(),
+        [file_rawContent]: () => content,
+    };
+}
+/**
+ * Create an object that implements the File interface. This object is intended to be
+ * passed into RequestBodyType.formData, and is not guaranteed to work as expected in
+ * other situations.
+ *
+ * Use this function to:
+ * - Create a File object for use in RequestBodyType.formData in environments where the
+ *   global File object is unavailable.
+ * - Create a File-like object from a readable stream without reading the stream into memory.
+ *
+ * @param stream - the content of the file as a callback returning a stream. When a File object made using createFile is
+ *                  passed in a request's form data map, the stream will not be read into memory
+ *                  and instead will be streamed when the request is made. In the event of a retry, the
+ *                  stream needs to be read again, so this callback SHOULD return a fresh stream if possible.
+ * @param name - the name of the file.
+ * @param options - optional metadata about the file, e.g. file name, file size, MIME type.
+ */
+function file_createFileFromStream(stream, name, options = {}) {
+    return {
+        ...file_unimplementedMethods,
+        type: options.type ?? "",
+        lastModified: options.lastModified ?? new Date().getTime(),
+        webkitRelativePath: options.webkitRelativePath ?? "",
+        size: options.size ?? -1,
+        name,
+        stream: () => {
+            const s = stream();
+            if (util_file_isNodeReadableStream(s)) {
+                throw new Error("Not supported: a Node stream was provided as input to createFileFromStream.");
+            }
+            return s;
+        },
+        [file_rawContent]: stream,
+    };
+}
+
+function hasArrayBuffer(source) {
+    return "resize" in source.buffer;
+}
+function file_toArrayBuffer(source) {
+    if (hasArrayBuffer(source)) {
+        // ArrayBuffer — return a copy if the view is a subarray of a larger buffer
+        if (source.byteOffset !== 0 || source.byteLength !== source.buffer.byteLength) {
+            return new Uint8Array(source);
+        }
+        return source;
+    }
+    // SharedArrayBuffer
+    return source.map((x) => x);
+}
+//# sourceMappingURL=file.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/multipartPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+/**
+ * Name of multipart policy
+ */
+const esm_policies_multipartPolicy_multipartPolicyName = (/* unused pure expression or super */ null && (tspMultipartPolicyName));
+/**
+ * Pipeline policy for multipart requests
+ */
+function esm_policies_multipartPolicy_multipartPolicy() {
+    const tspPolicy = tspMultipartPolicy();
+    return {
+        name: esm_policies_multipartPolicy_multipartPolicyName,
+        sendRequest: async (request, next) => {
+            if (request.multipartBody) {
+                for (const part of request.multipartBody.parts) {
+                    if (hasRawContent(part.body)) {
+                        part.body = getRawContent(part.body);
+                    }
+                }
+            }
+            return tspPolicy.sendRequest(request, next);
+        },
+    };
+}
+//# sourceMappingURL=multipartPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/decompressResponsePolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * The programmatic identifier of the decompressResponsePolicy.
+ */
+const policies_decompressResponsePolicy_decompressResponsePolicyName = (/* unused pure expression or super */ null && (tspDecompressResponsePolicyName));
+/**
+ * A policy to enable response decompression according to Accept-Encoding header
+ * https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Accept-Encoding
+ */
+function esm_policies_decompressResponsePolicy_decompressResponsePolicy() {
+    return tspDecompressResponsePolicy();
+}
+//# sourceMappingURL=decompressResponsePolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/defaultRetryPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * Name of the {@link defaultRetryPolicy}
+ */
+const policies_defaultRetryPolicy_defaultRetryPolicyName = (/* unused pure expression or super */ null && (tspDefaultRetryPolicyName));
+/**
+ * A policy that retries according to three strategies:
+ * - When the server sends a 429 response with a Retry-After header.
+ * - When there are errors in the underlying transport layer (e.g. DNS lookup failures).
+ * - Or otherwise if the outgoing request fails, it will retry with an exponentially increasing delay.
+ */
+function esm_policies_defaultRetryPolicy_defaultRetryPolicy(options = {}) {
+    return tspDefaultRetryPolicy(options);
+}
+//# sourceMappingURL=defaultRetryPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/formDataPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * The programmatic identifier of the formDataPolicy.
+ */
+const policies_formDataPolicy_formDataPolicyName = (/* unused pure expression or super */ null && (tspFormDataPolicyName));
+/**
+ * A policy that encodes FormData on the request into the body.
+ */
+function esm_policies_formDataPolicy_formDataPolicy() {
+    return tspFormDataPolicy();
+}
+//# sourceMappingURL=formDataPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/proxyPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * The programmatic identifier of the proxyPolicy.
+ */
+const policies_proxyPolicy_proxyPolicyName = (/* unused pure expression or super */ null && (tspProxyPolicyName));
+/**
+ * This method converts a proxy url into `ProxySettings` for use with ProxyPolicy.
+ * If no argument is given, it attempts to parse a proxy URL from the environment
+ * variables `HTTPS_PROXY` or `HTTP_PROXY`.
+ * @param proxyUrl - The url of the proxy to use. May contain authentication information.
+ * @deprecated - Internally this method is no longer necessary when setting proxy information.
+ */
+function policies_proxyPolicy_getDefaultProxySettings(proxyUrl) {
+    return tspGetDefaultProxySettings(proxyUrl);
+}
+/**
+ * A policy that allows one to apply proxy settings to all requests.
+ * If not passed static settings, they will be retrieved from the HTTPS_PROXY
+ * or HTTP_PROXY environment variables.
+ * @param proxySettings - ProxySettings to use on each request.
+ * @param options - additional settings, for example, custom NO_PROXY patterns
+ */
+function esm_policies_proxyPolicy_proxyPolicy(proxySettings, options) {
+    return tspProxyPolicy(proxySettings, options);
+}
+//# sourceMappingURL=proxyPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/agentPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * Name of the Agent Policy
+ */
+const policies_agentPolicy_agentPolicyName = (/* unused pure expression or super */ null && (tspAgentPolicyName));
+/**
+ * Gets a pipeline policy that sets http.agent
+ */
+function esm_policies_agentPolicy_agentPolicy(agent) {
+    return tspAgentPolicy(agent);
+}
+//# sourceMappingURL=agentPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/tlsPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * Name of the TLS Policy
+ */
+const policies_tlsPolicy_tlsPolicyName = (/* unused pure expression or super */ null && (tspTlsPolicyName));
+/**
+ * Gets a pipeline policy that adds the client certificate to the HttpClient agent for authentication.
+ */
+function esm_policies_tlsPolicy_tlsPolicy(tlsSettings) {
+    return tspTlsPolicy(tlsSettings);
+}
+//# sourceMappingURL=tlsPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/restError.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * A custom error type for failed pipeline requests.
+ */
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+const dist_esm_restError_RestError = restError_RestError;
+/**
+ * Typeguard for RestError
+ * @param e - Something caught by a catch clause.
+ */
+function dist_esm_restError_isRestError(e) {
+    return restError_isRestError(e);
+}
+//# sourceMappingURL=restError.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/tracingPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+
+
+
+
+
+/**
+ * The programmatic identifier of the tracingPolicy.
+ */
+const tracingPolicy_tracingPolicyName = "tracingPolicy";
+/**
+ * A simple policy to create OpenTelemetry Spans for each request made by the pipeline
+ * that has SpanOptions with a parent.
+ * Requests made without a parent Span will not be recorded.
+ * @param options - Options to configure the telemetry logged by the tracing policy.
+ */
+function policies_tracingPolicy_tracingPolicy(options = {}) {
+    const userAgentPromise = getUserAgentValue(options.userAgentPrefix);
+    const sanitizer = new Sanitizer({
+        additionalAllowedQueryParameters: options.additionalAllowedQueryParameters,
+    });
+    const tracingClient = tracingPolicy_tryCreateTracingClient();
+    return {
+        name: tracingPolicy_tracingPolicyName,
+        async sendRequest(request, next) {
+            if (!tracingClient) {
+                return next(request);
+            }
+            const userAgent = await userAgentPromise;
+            const spanAttributes = {
+                "http.url": sanitizer.sanitizeUrl(request.url),
+                "http.method": request.method,
+                "http.user_agent": userAgent,
+                requestId: request.requestId,
+            };
+            if (userAgent) {
+                spanAttributes["http.user_agent"] = userAgent;
+            }
+            const { span, tracingContext } = tracingPolicy_tryCreateSpan(tracingClient, request, spanAttributes) ?? {};
+            if (!span || !tracingContext) {
+                return next(request);
+            }
+            try {
+                const response = await tracingClient.withContext(tracingContext, next, request);
+                tracingPolicy_tryProcessResponse(span, response);
+                return response;
+            }
+            catch (err) {
+                tracingPolicy_tryProcessError(span, err);
+                throw err;
+            }
+        },
+    };
+}
+function tracingPolicy_tryCreateTracingClient() {
+    try {
+        return createTracingClient({
+            namespace: "",
+            packageName: "@azure/core-rest-pipeline",
+            packageVersion: SDK_VERSION,
+        });
+    }
+    catch (e) {
+        logger.warning(`Error when creating the TracingClient: ${getErrorMessage(e)}`);
+        return undefined;
+    }
+}
+function tracingPolicy_tryCreateSpan(tracingClient, request, spanAttributes) {
+    try {
+        // As per spec, we do not need to differentiate between HTTP and HTTPS in span name.
+        const { span, updatedOptions } = tracingClient.startSpan(`HTTP ${request.method}`, { tracingOptions: request.tracingOptions }, {
+            spanKind: "client",
+            spanAttributes,
+        });
+        // If the span is not recording, don't do any more work.
+        if (!span.isRecording()) {
+            span.end();
+            return undefined;
+        }
+        // set headers
+        const headers = tracingClient.createRequestHeaders(updatedOptions.tracingOptions.tracingContext);
+        for (const [key, value] of Object.entries(headers)) {
+            request.headers.set(key, value);
+        }
+        return { span, tracingContext: updatedOptions.tracingOptions.tracingContext };
+    }
+    catch (e) {
+        logger.warning(`Skipping creating a tracing span due to an error: ${getErrorMessage(e)}`);
+        return undefined;
+    }
+}
+function tracingPolicy_tryProcessError(span, error) {
+    try {
+        span.setStatus({
+            status: "error",
+            error: isError(error) ? error : undefined,
+        });
+        if (isRestError(error) && error.statusCode) {
+            span.setAttribute("http.status_code", error.statusCode);
+        }
+        span.end();
+    }
+    catch (e) {
+        logger.warning(`Skipping tracing span processing due to an error: ${getErrorMessage(e)}`);
+    }
+}
+function tracingPolicy_tryProcessResponse(span, response) {
+    try {
+        span.setAttribute("http.status_code", response.status);
+        const serviceRequestId = response.headers.get("x-ms-request-id");
+        if (serviceRequestId) {
+            span.setAttribute("serviceRequestId", serviceRequestId);
+        }
+        // Per semantic conventions, only set the status to error if the status code is 4xx or 5xx.
+        // Otherwise, the status MUST remain unset.
+        // https://opentelemetry.io/docs/specs/semconv/http/http-spans/#status
+        if (response.status >= 400) {
+            span.setStatus({
+                status: "error",
+            });
+        }
+        span.end();
+    }
+    catch (e) {
+        logger.warning(`Skipping tracing span processing due to an error: ${getErrorMessage(e)}`);
+    }
+}
+//# sourceMappingURL=tracingPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/createPipelineFromOptions.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Create a new pipeline with a default set of customizable policies.
+ * @param options - Options to configure a custom pipeline.
+ */
+function dist_esm_createPipelineFromOptions_createPipelineFromOptions(options) {
+    const pipeline = createEmptyPipeline();
+    if (isNodeLike) {
+        if (options.agent) {
+            pipeline.addPolicy(agentPolicy(options.agent));
+        }
+        if (options.tlsOptions) {
+            pipeline.addPolicy(tlsPolicy(options.tlsOptions));
+        }
+        pipeline.addPolicy(proxyPolicy(options.proxyOptions));
+        pipeline.addPolicy(decompressResponsePolicy());
+    }
+    pipeline.addPolicy(wrapAbortSignalLikePolicy());
+    pipeline.addPolicy(formDataPolicy(), { beforePolicies: [multipartPolicyName] });
+    pipeline.addPolicy(userAgentPolicy(options.userAgentOptions));
+    pipeline.addPolicy(setClientRequestIdPolicy(options.telemetryOptions?.clientRequestIdHeaderName));
+    // The multipart policy is added after policies with no phase, so that
+    // policies can be added between it and formDataPolicy to modify
+    // properties (e.g., making the boundary constant in recorded tests).
+    pipeline.addPolicy(multipartPolicy(), { afterPhase: "Deserialize" });
+    pipeline.addPolicy(defaultRetryPolicy(options.retryOptions), { phase: "Retry" });
+    pipeline.addPolicy(tracingPolicy({ ...options.userAgentOptions, ...options.loggingOptions }), {
+        afterPhase: "Retry",
+    });
+    if (isNodeLike) {
+        // Both XHR and Fetch expect to handle redirects automatically,
+        // so only include this policy when we're in Node.
+        pipeline.addPolicy(redirectPolicy(options.redirectOptions), { afterPhase: "Retry" });
+    }
+    pipeline.addPolicy(logPolicy(options.loggingOptions), { afterPhase: "Sign" });
+    return pipeline;
+}
+//# sourceMappingURL=createPipelineFromOptions.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/util/wrapAbortSignal.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+/**
+ * Creates a native AbortSignal which reflects the state of the provided AbortSignalLike.
+ * If the AbortSignalLike is already a native AbortSignal, it is returned as is.
+ * @param abortSignalLike - The AbortSignalLike to wrap.
+ * @returns - An object containing the native AbortSignal and an optional cleanup function. The cleanup function should be called when the AbortSignal is no longer needed.
+ */
+function wrapAbortSignal_wrapAbortSignalLike(abortSignalLike) {
+    if (abortSignalLike instanceof AbortSignal) {
+        return { abortSignal: abortSignalLike };
+    }
+    if (abortSignalLike.aborted) {
+        return {
+            abortSignal: AbortSignal.abort("reason" in abortSignalLike ? abortSignalLike.reason : undefined),
+        };
+    }
+    const controller = new AbortController();
+    let needsCleanup = true;
+    function cleanup() {
+        if (needsCleanup) {
+            abortSignalLike.removeEventListener("abort", listener);
+            needsCleanup = false;
+        }
+    }
+    function listener() {
+        controller.abort("reason" in abortSignalLike ? abortSignalLike.reason : undefined);
+        cleanup();
+    }
+    abortSignalLike.addEventListener("abort", listener);
+    return { abortSignal: controller.signal, cleanup };
+}
+//# sourceMappingURL=wrapAbortSignal.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/defaultHttpClient.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+/**
+ * Create the correct HttpClient for the current environment.
+ */
+function dist_esm_defaultHttpClient_createDefaultHttpClient() {
+    const client = defaultHttpClient_createDefaultHttpClient();
+    return {
+        async sendRequest(request) {
+            // we wrap any AbortSignalLike here since the TypeSpec runtime expects a native AbortSignal.
+            // 99% of the time, this should be a no-op since a native AbortSignal is passed in.
+            const { abortSignal, cleanup } = request.abortSignal
+                ? wrapAbortSignal_wrapAbortSignalLike(request.abortSignal)
+                : {};
+            try {
+                request.abortSignal = abortSignal;
+                return await client.sendRequest(request);
+            }
+            finally {
+                cleanup?.();
+            }
+        },
+    };
+}
+//# sourceMappingURL=defaultHttpClient.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/httpHeaders.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * Creates an object that satisfies the `HttpHeaders` interface.
+ * @param rawHeaders - A simple object representing initial headers
+ */
+function dist_esm_httpHeaders_createHttpHeaders(rawHeaders) {
+    return tspCreateHttpHeaders(rawHeaders);
+}
+//# sourceMappingURL=httpHeaders.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/pipelineRequest.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * Creates a new pipeline request with the given options.
+ * This method is to allow for the easy setting of default values and not required.
+ * @param options - The options to create the request with.
+ */
+function dist_esm_pipelineRequest_createPipelineRequest(options) {
+    // Cast required due to difference between ts-http-runtime requiring AbortSignal while core-rest-pipeline allows
+    // the more generic AbortSignalLike. The wrapAbortSignalLike pipeline policy will take care of ensuring that any AbortSignalLike in the request
+    // is converted into a true AbortSignal.
+    return tspCreatePipelineRequest(options);
+}
+//# sourceMappingURL=pipelineRequest.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/exponentialRetryPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * The programmatic identifier of the exponentialRetryPolicy.
+ */
+const policies_exponentialRetryPolicy_exponentialRetryPolicyName = (/* unused pure expression or super */ null && (tspExponentialRetryPolicyName));
+/**
+ * A policy that attempts to retry requests while introducing an exponentially increasing delay.
+ * @param options - Options that configure retry logic.
+ */
+function policies_exponentialRetryPolicy_exponentialRetryPolicy(options = {}) {
+    return tspExponentialRetryPolicy(options);
+}
+//# sourceMappingURL=exponentialRetryPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/systemErrorRetryPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * Name of the {@link systemErrorRetryPolicy}
+ */
+const policies_systemErrorRetryPolicy_systemErrorRetryPolicyName = (/* unused pure expression or super */ null && (tspSystemErrorRetryPolicyName));
+/**
+ * A retry policy that specifically seeks to handle errors in the
+ * underlying transport layer (e.g. DNS lookup failures) rather than
+ * retryable error codes from the server itself.
+ * @param options - Options that customize the policy.
+ */
+function policies_systemErrorRetryPolicy_systemErrorRetryPolicy(options = {}) {
+    return tspSystemErrorRetryPolicy(options);
+}
+//# sourceMappingURL=systemErrorRetryPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/throttlingRetryPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/**
+ * Name of the {@link throttlingRetryPolicy}
+ */
+const policies_throttlingRetryPolicy_throttlingRetryPolicyName = (/* unused pure expression or super */ null && (tspThrottlingRetryPolicyName));
+/**
+ * A policy that retries when the server sends a 429 response with a Retry-After header.
+ *
+ * To learn more, please refer to
+ * https://learn.microsoft.com/azure/azure-resource-manager/resource-manager-request-limits,
+ * https://learn.microsoft.com/azure/azure-subscription-service-limits and
+ * https://learn.microsoft.com/azure/virtual-machines/troubleshooting/troubleshooting-throttling-errors
+ *
+ * @param options - Options that configure retry logic.
+ */
+function policies_throttlingRetryPolicy_throttlingRetryPolicy(options = {}) {
+    return tspThrottlingRetryPolicy(options);
+}
+//# sourceMappingURL=throttlingRetryPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/retryPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+
+const policies_retryPolicy_retryPolicyLogger = esm_createClientLogger("core-rest-pipeline retryPolicy");
+/**
+ * retryPolicy is a generic policy to enable retrying requests when certain conditions are met
+ */
+function esm_policies_retryPolicy_retryPolicy(strategies, options = { maxRetries: DEFAULT_RETRY_POLICY_COUNT }) {
+    // Cast is required since the TSP runtime retry strategy type is slightly different
+    // very deep down (using real AbortSignal vs. AbortSignalLike in RestError).
+    // In practice the difference doesn't actually matter.
+    return tspRetryPolicy(strategies, {
+        logger: policies_retryPolicy_retryPolicyLogger,
+        ...options,
+    });
+}
+//# sourceMappingURL=retryPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/util/tokenCycler.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+// Default options for the cycler if none are provided
+const tokenCycler_DEFAULT_CYCLER_OPTIONS = {
+    forcedRefreshWindowInMs: 1000, // Force waiting for a refresh 1s before the token expires
+    retryIntervalInMs: 3000, // Allow refresh attempts every 3s
+    refreshWindowInMs: 1000 * 60 * 2, // Start refreshing 2m before expiry
+};
+/**
+ * Converts an an unreliable access token getter (which may resolve with null)
+ * into an AccessTokenGetter by retrying the unreliable getter in a regular
+ * interval.
+ *
+ * @param getAccessToken - A function that produces a promise of an access token that may fail by returning null.
+ * @param retryIntervalInMs - The time (in milliseconds) to wait between retry attempts.
+ * @param refreshTimeout - The timestamp after which the refresh attempt will fail, throwing an exception.
+ * @returns - A promise that, if it resolves, will resolve with an access token.
+ */
+async function tokenCycler_beginRefresh(getAccessToken, retryIntervalInMs, refreshTimeout) {
+    // This wrapper handles exceptions gracefully as long as we haven't exceeded
+    // the timeout.
+    async function tryGetAccessToken() {
+        if (Date.now() < refreshTimeout) {
+            try {
+                return await getAccessToken();
+            }
+            catch {
+                return null;
+            }
+        }
+        else {
+            const finalToken = await getAccessToken();
+            // Timeout is up, so throw if it's still null
+            if (finalToken === null) {
+                throw new Error("Failed to refresh access token.");
+            }
+            return finalToken;
+        }
+    }
+    let token = await tryGetAccessToken();
+    while (token === null) {
+        await delay(retryIntervalInMs);
+        token = await tryGetAccessToken();
+    }
+    return token;
+}
+/**
+ * Creates a token cycler from a credential, scopes, and optional settings.
+ *
+ * A token cycler represents a way to reliably retrieve a valid access token
+ * from a TokenCredential. It will handle initializing the token, refreshing it
+ * when it nears expiration, and synchronizes refresh attempts to avoid
+ * concurrency hazards.
+ *
+ * @param credential - the underlying TokenCredential that provides the access
+ * token
+ * @param tokenCyclerOptions - optionally override default settings for the cycler
+ *
+ * @returns - a function that reliably produces a valid access token
+ */
+function util_tokenCycler_createTokenCycler(credential, tokenCyclerOptions) {
+    let refreshWorker = null;
+    let token = null;
+    let tenantId;
+    const options = {
+        ...tokenCycler_DEFAULT_CYCLER_OPTIONS,
+        ...tokenCyclerOptions,
+    };
+    /**
+     * This little holder defines several predicates that we use to construct
+     * the rules of refreshing the token.
+     */
+    const cycler = {
+        /**
+         * Produces true if a refresh job is currently in progress.
+         */
+        get isRefreshing() {
+            return refreshWorker !== null;
+        },
+        /**
+         * Produces true if the cycler SHOULD refresh (we are within the refresh
+         * window and not already refreshing)
+         */
+        get shouldRefresh() {
+            if (token === null) {
+                return true;
+            }
+            if (cycler.isRefreshing) {
+                return false;
+            }
+            if (token.refreshAfterTimestamp && token.refreshAfterTimestamp < Date.now()) {
+                return true;
+            }
+            return token.expiresOnTimestamp - options.refreshWindowInMs < Date.now();
+        },
+        /**
+         * Produces true if the cycler MUST refresh (null or nearly-expired
+         * token).
+         */
+        get mustRefresh() {
+            return (token === null || token.expiresOnTimestamp - options.forcedRefreshWindowInMs < Date.now());
+        },
+    };
+    /**
+     * Starts a refresh job or returns the existing job if one is already
+     * running.
+     */
+    function refresh(scopes, getTokenOptions) {
+        if (!cycler.isRefreshing) {
+            // We bind `scopes` here to avoid passing it around a lot
+            const tryGetAccessToken = () => credential.getToken(scopes, getTokenOptions);
+            // Take advantage of promise chaining to insert an assignment to `token`
+            // before the refresh can be considered done.
+            refreshWorker = tokenCycler_beginRefresh(tryGetAccessToken, options.retryIntervalInMs, 
+            // If we don't have a token, then we should timeout immediately
+            token?.expiresOnTimestamp ?? Date.now())
+                .then((_token) => {
+                refreshWorker = null;
+                token = _token;
+                tenantId = getTokenOptions.tenantId;
+                return token;
+            })
+                .catch((reason) => {
+                // We also should reset the refresher if we enter a failed state.  All
+                // existing awaiters will throw, but subsequent requests will start a
+                // new retry chain.
+                refreshWorker = null;
+                token = null;
+                tenantId = undefined;
+                throw reason;
+            });
+        }
+        return refreshWorker;
+    }
+    return async (scopes, tokenOptions) => {
+        //
+        // Simple rules:
+        // - If we MUST refresh, then return the refresh task, blocking
+        //   the pipeline until a token is available.
+        // - If we SHOULD refresh, then run refresh but don't return it
+        //   (we can still use the cached token).
+        // - Return the token, since it's fine if we didn't return in
+        //   step 1.
+        //
+        const hasClaimChallenge = Boolean(tokenOptions.claims);
+        const tenantIdChanged = tenantId !== tokenOptions.tenantId;
+        if (hasClaimChallenge) {
+            // If we've received a claim, we know the existing token isn't valid
+            // We want to clear it so that that refresh worker won't use the old expiration time as a timeout
+            token = null;
+        }
+        // If the tenantId passed in token options is different to the one we have
+        // Or if we are in claim challenge and the token was rejected and a new access token need to be issued, we need to
+        // refresh the token with the new tenantId or token.
+        const mustRefresh = tenantIdChanged || hasClaimChallenge || cycler.mustRefresh;
+        if (mustRefresh) {
+            return refresh(scopes, tokenOptions);
+        }
+        if (cycler.shouldRefresh) {
+            refresh(scopes, tokenOptions);
+        }
+        return token;
+    };
+}
+//# sourceMappingURL=tokenCycler.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/bearerTokenAuthenticationPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+
+/**
+ * The programmatic identifier of the bearerTokenAuthenticationPolicy.
+ */
+const bearerTokenAuthenticationPolicy_bearerTokenAuthenticationPolicyName = "bearerTokenAuthenticationPolicy";
+/**
+ * Try to send the given request.
+ *
+ * When a response is received, returns a tuple of the response received and, if the response was received
+ * inside a thrown RestError, the RestError that was thrown.
+ *
+ * Otherwise, if an error was thrown while sending the request that did not provide an underlying response, it
+ * will be rethrown.
+ */
+async function bearerTokenAuthenticationPolicy_trySendRequest(request, next) {
+    try {
+        return [await next(request), undefined];
+    }
+    catch (e) {
+        if (isRestError(e) && e.response) {
+            return [e.response, e];
+        }
+        else {
+            throw e;
+        }
+    }
+}
+/**
+ * Default authorize request handler
+ */
+async function bearerTokenAuthenticationPolicy_defaultAuthorizeRequest(options) {
+    const { scopes, getAccessToken, request } = options;
+    // Enable CAE true by default
+    const getTokenOptions = {
+        abortSignal: request.abortSignal,
+        tracingOptions: request.tracingOptions,
+        enableCae: true,
+    };
+    const accessToken = await getAccessToken(scopes, getTokenOptions);
+    if (accessToken) {
+        options.request.headers.set("Authorization", `Bearer ${accessToken.token}`);
+    }
+}
+/**
+ * We will retrieve the challenge only if the response status code was 401,
+ * and if the response contained the header "WWW-Authenticate" with a non-empty value.
+ */
+function bearerTokenAuthenticationPolicy_isChallengeResponse(response) {
+    return response.status === 401 && response.headers.has("WWW-Authenticate");
+}
+/**
+ * Re-authorize the request for CAE challenge.
+ * The response containing the challenge is `options.response`.
+ * If this method returns true, the underlying request will be sent once again.
+ */
+async function bearerTokenAuthenticationPolicy_authorizeRequestOnCaeChallenge(onChallengeOptions, caeClaims) {
+    const { scopes } = onChallengeOptions;
+    const accessToken = await onChallengeOptions.getAccessToken(scopes, {
+        enableCae: true,
+        claims: caeClaims,
+    });
+    if (!accessToken) {
+        return false;
+    }
+    onChallengeOptions.request.headers.set("Authorization", `${accessToken.tokenType ?? "Bearer"} ${accessToken.token}`);
+    return true;
+}
+/**
+ * A policy that can request a token from a TokenCredential implementation and
+ * then apply it to the Authorization header of a request as a Bearer token.
+ */
+function bearerTokenAuthenticationPolicy_bearerTokenAuthenticationPolicy(options) {
+    const { credential, scopes, challengeCallbacks } = options;
+    const logger = options.logger || coreLogger;
+    const callbacks = {
+        authorizeRequest: challengeCallbacks?.authorizeRequest?.bind(challengeCallbacks) ?? bearerTokenAuthenticationPolicy_defaultAuthorizeRequest,
+        authorizeRequestOnChallenge: challengeCallbacks?.authorizeRequestOnChallenge?.bind(challengeCallbacks),
+    };
+    // This function encapsulates the entire process of reliably retrieving the token
+    // The options are left out of the public API until there's demand to configure this.
+    // Remember to extend `BearerTokenAuthenticationPolicyOptions` with `TokenCyclerOptions`
+    // in order to pass through the `options` object.
+    const getAccessToken = credential
+        ? createTokenCycler(credential /* , options */)
+        : () => Promise.resolve(null);
+    return {
+        name: bearerTokenAuthenticationPolicy_bearerTokenAuthenticationPolicyName,
+        /**
+         * If there's no challenge parameter:
+         * - It will try to retrieve the token using the cache, or the credential's getToken.
+         * - Then it will try the next policy with or without the retrieved token.
+         *
+         * It uses the challenge parameters to:
+         * - Skip a first attempt to get the token from the credential if there's no cached token,
+         *   since it expects the token to be retrievable only after the challenge.
+         * - Prepare the outgoing request if the `prepareRequest` method has been provided.
+         * - Send an initial request to receive the challenge if it fails.
+         * - Process a challenge if the response contains it.
+         * - Retrieve a token with the challenge information, then re-send the request.
+         */
+        async sendRequest(request, next) {
+            if (!request.url.toLowerCase().startsWith("https://")) {
+                throw new Error("Bearer token authentication is not permitted for non-TLS protected (non-https) URLs.");
+            }
+            await callbacks.authorizeRequest({
+                scopes: Array.isArray(scopes) ? scopes : [scopes],
+                request,
+                getAccessToken,
+                logger,
+            });
+            let response;
+            let error;
+            let shouldSendRequest;
+            [response, error] = await bearerTokenAuthenticationPolicy_trySendRequest(request, next);
+            if (bearerTokenAuthenticationPolicy_isChallengeResponse(response)) {
+                let claims = bearerTokenAuthenticationPolicy_getCaeChallengeClaims(response.headers.get("WWW-Authenticate"));
+                // Handle CAE by default when receive CAE claim
+                if (claims) {
+                    let parsedClaim;
+                    // Return the response immediately if claims is not a valid base64 encoded string
+                    try {
+                        parsedClaim = atob(claims);
+                    }
+                    catch (e) {
+                        logger.warning(`The WWW-Authenticate header contains "claims" that cannot be parsed. Unable to perform the Continuous Access Evaluation authentication flow. Unparsable claims: ${claims}`);
+                        return response;
+                    }
+                    shouldSendRequest = await bearerTokenAuthenticationPolicy_authorizeRequestOnCaeChallenge({
+                        scopes: Array.isArray(scopes) ? scopes : [scopes],
+                        response,
+                        request,
+                        getAccessToken,
+                        logger,
+                    }, parsedClaim);
+                    // Send updated request and handle response for RestError
+                    if (shouldSendRequest) {
+                        [response, error] = await bearerTokenAuthenticationPolicy_trySendRequest(request, next);
+                    }
+                }
+                else if (callbacks.authorizeRequestOnChallenge) {
+                    // Handle custom challenges when client provides custom callback
+                    shouldSendRequest = await callbacks.authorizeRequestOnChallenge({
+                        scopes: Array.isArray(scopes) ? scopes : [scopes],
+                        request,
+                        response,
+                        getAccessToken,
+                        logger,
+                    });
+                    // Send updated request and handle response for RestError
+                    if (shouldSendRequest) {
+                        [response, error] = await bearerTokenAuthenticationPolicy_trySendRequest(request, next);
+                    }
+                    // If we get another CAE Claim, we will handle it by default and return whatever value we receive for this
+                    if (bearerTokenAuthenticationPolicy_isChallengeResponse(response)) {
+                        claims = bearerTokenAuthenticationPolicy_getCaeChallengeClaims(response.headers.get("WWW-Authenticate") ?? "");
+                        if (claims) {
+                            let parsedClaim;
+                            try {
+                                parsedClaim = atob(claims);
+                            }
+                            catch (e) {
+                                logger.warning(`The WWW-Authenticate header contains "claims" that cannot be parsed. Unable to perform the Continuous Access Evaluation authentication flow. Unparsable claims: ${claims}`);
+                                return response;
+                            }
+                            shouldSendRequest = await bearerTokenAuthenticationPolicy_authorizeRequestOnCaeChallenge({
+                                scopes: Array.isArray(scopes) ? scopes : [scopes],
+                                response,
+                                request,
+                                getAccessToken,
+                                logger,
+                            }, parsedClaim);
+                            // Send updated request and handle response for RestError
+                            if (shouldSendRequest) {
+                                [response, error] = await bearerTokenAuthenticationPolicy_trySendRequest(request, next);
+                            }
+                        }
+                    }
+                }
+            }
+            if (error) {
+                throw error;
+            }
+            else {
+                return response;
+            }
+        },
+    };
+}
+/**
+ * Converts: `Bearer a="b", c="d", Pop e="f", g="h"`.
+ * Into: `[ { scheme: 'Bearer', params: { a: 'b', c: 'd' } }, { scheme: 'Pop', params: { e: 'f', g: 'h' } } ]`.
+ *
+ * @internal
+ */
+function bearerTokenAuthenticationPolicy_parseChallenges(challenges) {
+    // Challenge regex seperates the string to individual challenges with different schemes in the format `Scheme a="b", c=d`
+    // The challenge regex captures parameteres with either quotes values or unquoted values
+    const challengeRegex = /(\w+)\s+((?:\w+=(?:"[^"]*"|[^,]*),?\s*)+)/g;
+    // Parameter regex captures the claims group removed from the scheme in the format `a="b"` and `c="d"`
+    // CAE challenge always have quoted parameters. For more reference, https://learn.microsoft.com/entra/identity-platform/claims-challenge
+    const paramRegex = /(\w+)="([^"]*)"/g;
+    const parsedChallenges = [];
+    let match;
+    // Iterate over each challenge match
+    while ((match = challengeRegex.exec(challenges)) !== null) {
+        const scheme = match[1];
+        const paramsString = match[2];
+        const params = {};
+        let paramMatch;
+        // Iterate over each parameter match
+        while ((paramMatch = paramRegex.exec(paramsString)) !== null) {
+            params[paramMatch[1]] = paramMatch[2];
+        }
+        parsedChallenges.push({ scheme, params });
+    }
+    return parsedChallenges;
+}
+/**
+ * Parse a pipeline response and look for a CAE challenge with "Bearer" scheme
+ * Return the value in the header without parsing the challenge
+ * @internal
+ */
+function bearerTokenAuthenticationPolicy_getCaeChallengeClaims(challenges) {
+    if (!challenges) {
+        return;
+    }
+    // Find all challenges present in the header
+    const parsedChallenges = bearerTokenAuthenticationPolicy_parseChallenges(challenges);
+    return parsedChallenges.find((x) => x.scheme === "Bearer" && x.params.claims && x.params.error === "insufficient_claims")?.params.claims;
+}
+//# sourceMappingURL=bearerTokenAuthenticationPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/policies/auxiliaryAuthenticationHeaderPolicy.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+/**
+ * The programmatic identifier of the auxiliaryAuthenticationHeaderPolicy.
+ */
+const auxiliaryAuthenticationHeaderPolicy_auxiliaryAuthenticationHeaderPolicyName = "auxiliaryAuthenticationHeaderPolicy";
+const auxiliaryAuthenticationHeaderPolicy_AUTHORIZATION_AUXILIARY_HEADER = "x-ms-authorization-auxiliary";
+async function auxiliaryAuthenticationHeaderPolicy_sendAuthorizeRequest(options) {
+    const { scopes, getAccessToken, request } = options;
+    const getTokenOptions = {
+        abortSignal: request.abortSignal,
+        tracingOptions: request.tracingOptions,
+    };
+    return (await getAccessToken(scopes, getTokenOptions))?.token ?? "";
+}
+/**
+ * A policy for external tokens to `x-ms-authorization-auxiliary` header.
+ * This header will be used when creating a cross-tenant application we may need to handle authentication requests
+ * for resources that are in different tenants.
+ * You could see [ARM docs](https://learn.microsoft.com/azure/azure-resource-manager/management/authenticate-multi-tenant) for a rundown of how this feature works
+ */
+function auxiliaryAuthenticationHeaderPolicy_auxiliaryAuthenticationHeaderPolicy(options) {
+    const { credentials, scopes } = options;
+    const logger = options.logger || coreLogger;
+    const tokenCyclerMap = new WeakMap();
+    return {
+        name: auxiliaryAuthenticationHeaderPolicy_auxiliaryAuthenticationHeaderPolicyName,
+        async sendRequest(request, next) {
+            if (!request.url.toLowerCase().startsWith("https://")) {
+                throw new Error("Bearer token authentication for auxiliary header is not permitted for non-TLS protected (non-https) URLs.");
+            }
+            if (!credentials || credentials.length === 0) {
+                logger.info(`${auxiliaryAuthenticationHeaderPolicy_auxiliaryAuthenticationHeaderPolicyName} header will not be set due to empty credentials.`);
+                return next(request);
+            }
+            const tokenPromises = [];
+            for (const credential of credentials) {
+                let getAccessToken = tokenCyclerMap.get(credential);
+                if (!getAccessToken) {
+                    getAccessToken = createTokenCycler(credential);
+                    tokenCyclerMap.set(credential, getAccessToken);
+                }
+                tokenPromises.push(auxiliaryAuthenticationHeaderPolicy_sendAuthorizeRequest({
+                    scopes: Array.isArray(scopes) ? scopes : [scopes],
+                    request,
+                    getAccessToken,
+                    logger,
+                }));
+            }
+            const auxiliaryTokens = (await Promise.all(tokenPromises)).filter((token) => Boolean(token));
+            if (auxiliaryTokens.length === 0) {
+                logger.warning(`None of the auxiliary tokens are valid. ${auxiliaryAuthenticationHeaderPolicy_AUTHORIZATION_AUXILIARY_HEADER} header will not be set.`);
+                return next(request);
+            }
+            request.headers.set(auxiliaryAuthenticationHeaderPolicy_AUTHORIZATION_AUXILIARY_HEADER, auxiliaryTokens.map((token) => `Bearer ${token}`).join(", "));
+            return next(request);
+        },
+    };
+}
+//# sourceMappingURL=auxiliaryAuthenticationHeaderPolicy.js.map
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/node_modules/@azure/core-rest-pipeline/dist/esm/index.js
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//# sourceMappingURL=index.js.map
 ;// CONCATENATED MODULE: ./node_modules/@azure/storage-common/dist/esm/cache.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
@@ -68516,7 +68686,7 @@ class UserDelegationKeyCredential {
 // Licensed under the MIT License.
 
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/utils/constants.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/utils/constants.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 const esm_utils_constants_SDK_VERSION = "12.31.0";
@@ -68743,7 +68913,7 @@ const utils_constants_PathStylePorts = [
     "11104",
 ];
 //# sourceMappingURL=constants.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/Pipeline.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/Pipeline.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -69015,7 +69185,7 @@ function isCoreHttpPolicyFactory(factory) {
     });
 }
 //# sourceMappingURL=Pipeline.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/models/index.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/models/index.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -69280,7 +69450,7 @@ var KnownStorageErrorCode;
     KnownStorageErrorCode["BlobAccessTierNotSupportedForAccountType"] = "BlobAccessTierNotSupportedForAccountType";
 })(KnownStorageErrorCode || (KnownStorageErrorCode = {}));
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/models/mappers.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/models/mappers.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -77611,7 +77781,7 @@ const BlockBlobGetBlockListExceptionHeaders = {
     },
 };
 //# sourceMappingURL=mappers.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/models/parameters.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/models/parameters.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -79286,7 +79456,7 @@ const listType = {
     },
 };
 //# sourceMappingURL=parameters.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/operations/service.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/operations/service.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -79611,7 +79781,7 @@ const filterBlobsOperationSpec = {
     serializer: xmlSerializer,
 };
 //# sourceMappingURL=service.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/operations/container.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/operations/container.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -80328,7 +80498,7 @@ const container_getAccountInfoOperationSpec = {
     serializer: container_xmlSerializer,
 };
 //# sourceMappingURL=container.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/operations/blob.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/operations/blob.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -81359,7 +81529,7 @@ const setTagsOperationSpec = {
     serializer: blob_xmlSerializer,
 };
 //# sourceMappingURL=blob.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/operations/pageBlob.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/operations/pageBlob.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -81818,7 +81988,7 @@ const copyIncrementalOperationSpec = {
     serializer: pageBlob_xmlSerializer,
 };
 //# sourceMappingURL=pageBlob.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/operations/appendBlob.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/operations/appendBlob.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -82042,7 +82212,7 @@ const sealOperationSpec = {
     serializer: appendBlob_xmlSerializer,
 };
 //# sourceMappingURL=appendBlob.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/operations/blockBlob.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/operations/blockBlob.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -82411,7 +82581,7 @@ const getBlockListOperationSpec = {
     serializer: blockBlob_xmlSerializer,
 };
 //# sourceMappingURL=blockBlob.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/operations/index.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/operations/index.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -82426,7 +82596,7 @@ const getBlockListOperationSpec = {
 
 
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/storageClient.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/storageClient.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -82488,7 +82658,7 @@ class StorageClient extends ExtendedServiceClient {
     blockBlob;
 }
 //# sourceMappingURL=storageClient.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generated/src/index.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generated/src/index.js
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -82500,7 +82670,7 @@ class StorageClient extends ExtendedServiceClient {
 
 
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/StorageContextClient.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/StorageContextClient.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -82518,7 +82688,7 @@ class StorageContextClient extends StorageClient {
     }
 }
 //# sourceMappingURL=StorageContextClient.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/utils/utils.common.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/utils/utils.common.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -83288,7 +83458,7 @@ function utils_common_assertResponse(response) {
     throw new TypeError(`Unexpected response object ${response}`);
 }
 //# sourceMappingURL=utils.common.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/StorageClient.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/StorageClient.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -83341,7 +83511,7 @@ class StorageClient_StorageClient {
     }
 }
 //# sourceMappingURL=StorageClient.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/utils/tracing.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/utils/tracing.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -83356,7 +83526,7 @@ const tracingClient = tracingClient_createTracingClient({
     namespace: "Microsoft.Storage",
 });
 //# sourceMappingURL=tracing.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/sas/BlobSASPermissions.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/sas/BlobSASPermissions.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 /**
@@ -83550,7 +83720,7 @@ class BlobSASPermissions {
     }
 }
 //# sourceMappingURL=BlobSASPermissions.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/sas/ContainerSASPermissions.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/sas/ContainerSASPermissions.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 /**
@@ -83770,7 +83940,7 @@ class ContainerSASPermissions {
     }
 }
 //# sourceMappingURL=ContainerSASPermissions.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/sas/SasIPRange.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/sas/SasIPRange.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 /**
@@ -83784,7 +83954,7 @@ function ipRangeToString(ipRange) {
     return ipRange.end ? `${ipRange.start}-${ipRange.end}` : ipRange.start;
 }
 //# sourceMappingURL=SasIPRange.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/sas/SASQueryParameters.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/sas/SASQueryParameters.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -84148,7 +84318,7 @@ class SASQueryParameters {
     }
 }
 //# sourceMappingURL=SASQueryParameters.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/sas/BlobSASSignatureValues.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/sas/BlobSASSignatureValues.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -84815,7 +84985,7 @@ function SASSignatureValuesSanityCheckAndAutofill(blobSASSignatureValues) {
     return blobSASSignatureValues;
 }
 //# sourceMappingURL=BlobSASSignatureValues.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/BlobLeaseClient.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/BlobLeaseClient.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -85017,7 +85187,7 @@ class BlobLeaseClient {
     }
 }
 //# sourceMappingURL=BlobLeaseClient.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/utils/RetriableReadableStream.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/utils/RetriableReadableStream.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -85145,7 +85315,7 @@ class RetriableReadableStream extends external_node_stream_.Readable {
     }
 }
 //# sourceMappingURL=RetriableReadableStream.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/BlobDownloadResponse.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/BlobDownloadResponse.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -85611,7 +85781,7 @@ class BlobDownloadResponse {
     }
 }
 //# sourceMappingURL=BlobDownloadResponse.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroConstants.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroConstants.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 const AVRO_SYNC_MARKER_SIZE = 16;
@@ -85619,7 +85789,7 @@ const AVRO_INIT_BYTES = new Uint8Array([79, 98, 106, 1]);
 const AVRO_CODEC_KEY = "avro.codec";
 const AVRO_SCHEMA_KEY = "avro.schema";
 //# sourceMappingURL=AvroConstants.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroParser.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroParser.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 class AvroParser {
@@ -85943,7 +86113,7 @@ class AvroRecordType extends AvroType {
     }
 }
 //# sourceMappingURL=AvroParser.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/internal-avro/utils/utils.common.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/internal-avro/utils/utils.common.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 function arraysEqual(a, b) {
@@ -85960,7 +86130,7 @@ function arraysEqual(a, b) {
     return true;
 }
 //# sourceMappingURL=utils.common.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroReader.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroReader.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 // TODO: Do a review of non-interfaces
@@ -86077,7 +86247,7 @@ class AvroReader {
     }
 }
 //# sourceMappingURL=AvroReader.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroReadable.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroReadable.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 class AvroReadable {
@@ -86085,7 +86255,7 @@ class AvroReadable {
 //# sourceMappingURL=AvroReadable.js.map
 ;// CONCATENATED MODULE: external "buffer"
 const external_buffer_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("buffer");
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroReadableFromStream.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/internal-avro/AvroReadableFromStream.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -86172,14 +86342,14 @@ class AvroReadableFromStream extends AvroReadable {
     }
 }
 //# sourceMappingURL=AvroReadableFromStream.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/internal-avro/index.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/internal-avro/index.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
 
 
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/utils/BlobQuickQueryStream.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/utils/BlobQuickQueryStream.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -86296,7 +86466,7 @@ class BlobQuickQueryStream extends external_node_stream_.Readable {
     }
 }
 //# sourceMappingURL=BlobQuickQueryStream.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/BlobQueryResponse.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/BlobQueryResponse.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -86666,7 +86836,7 @@ class BlobQueryResponse {
     }
 }
 //# sourceMappingURL=BlobQueryResponse.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/models.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/models.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -86782,7 +86952,7 @@ function getBlobServiceAccountAudience(storageAccountName) {
     return `https://${storageAccountName}.blob.core.windows.net/.default`;
 }
 //# sourceMappingURL=models.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/PageBlobRangeResponse.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/PageBlobRangeResponse.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 /**
@@ -88040,7 +88210,7 @@ class LroEngine extends Poller {
 
 
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/pollers/BlobStartCopyFromUrlPoller.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/pollers/BlobStartCopyFromUrlPoller.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -88175,7 +88345,7 @@ function makeBlobBeginCopyFromURLPollOperation(state) {
     };
 }
 //# sourceMappingURL=BlobStartCopyFromUrlPoller.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/Range.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/Range.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 /**
@@ -88197,7 +88367,7 @@ function rangeToString(iRange) {
         : `bytes=${iRange.offset}-`;
 }
 //# sourceMappingURL=Range.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/utils/Batch.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/utils/Batch.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 // In browser, during webpack or browserify bundling, this module will be replaced by 'events'
@@ -88330,7 +88500,7 @@ class Batch {
 //# sourceMappingURL=Batch.js.map
 ;// CONCATENATED MODULE: external "node:fs"
 const external_node_fs_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs");
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/utils/utils.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/utils/utils.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -88463,7 +88633,7 @@ async function readStreamToLocalFile(rs, file) {
 const fsStat = external_node_util_.promisify(external_node_fs_namespaceObject.stat);
 const fsCreateReadStream = external_node_fs_namespaceObject.createReadStream;
 //# sourceMappingURL=utils.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/Clients.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/Clients.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -91309,7 +91479,7 @@ class PageBlobClient extends BlobClient {
     }
 }
 //# sourceMappingURL=Clients.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/BatchUtils.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/BatchUtils.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -91325,7 +91495,7 @@ function utf8ByteLength(str) {
     return Buffer.byteLength(str);
 }
 //# sourceMappingURL=BatchUtils.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/BatchResponseParser.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/BatchResponseParser.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -91468,7 +91638,7 @@ class BatchResponseParser {
     }
 }
 //# sourceMappingURL=BatchResponseParser.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/utils/Mutex.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/utils/Mutex.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 var MutexLockStatus;
@@ -91534,7 +91704,7 @@ class Mutex {
     }
 }
 //# sourceMappingURL=Mutex.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/BlobBatch.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/BlobBatch.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -91809,7 +91979,7 @@ function batchHeaderFilterPolicy() {
     };
 }
 //# sourceMappingURL=BlobBatch.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/BlobBatchClient.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/BlobBatchClient.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -91982,7 +92152,7 @@ class BlobBatchClient {
     }
 }
 //# sourceMappingURL=BlobBatchClient.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/ContainerClient.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/ContainerClient.js
 
 
 
@@ -93276,7 +93446,7 @@ class ContainerClient extends StorageClient_StorageClient {
     }
 }
 //# sourceMappingURL=ContainerClient.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/sas/AccountSASPermissions.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/sas/AccountSASPermissions.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 /**
@@ -93502,7 +93672,7 @@ class AccountSASPermissions {
     }
 }
 //# sourceMappingURL=AccountSASPermissions.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/sas/AccountSASResourceTypes.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/sas/AccountSASResourceTypes.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 /**
@@ -93573,7 +93743,7 @@ class AccountSASResourceTypes {
     }
 }
 //# sourceMappingURL=AccountSASResourceTypes.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/sas/AccountSASServices.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/sas/AccountSASServices.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 /**
@@ -93652,7 +93822,7 @@ class AccountSASServices {
     }
 }
 //# sourceMappingURL=AccountSASServices.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/sas/AccountSASSignatureValues.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/sas/AccountSASSignatureValues.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -93753,7 +93923,7 @@ function generateAccountSASQueryParametersInternal(accountSASSignatureValues, sh
     };
 }
 //# sourceMappingURL=AccountSASSignatureValues.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/BlobServiceClient.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/BlobServiceClient.js
 
 
 
@@ -94456,7 +94626,7 @@ class BlobServiceClient extends StorageClient_StorageClient {
     }
 }
 //# sourceMappingURL=BlobServiceClient.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/generatedModels.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/generatedModels.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 /** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
@@ -94465,7 +94635,7 @@ var generatedModels_KnownEncryptionAlgorithmType;
     KnownEncryptionAlgorithmType["AES256"] = "AES256";
 })(generatedModels_KnownEncryptionAlgorithmType || (generatedModels_KnownEncryptionAlgorithmType = {}));
 //# sourceMappingURL=generatedModels.js.map
-;// CONCATENATED MODULE: ./node_modules/@actions/cache/node_modules/@azure/storage-blob/dist/esm/index.js
+;// CONCATENATED MODULE: ./node_modules/@azure/storage-blob/dist/esm/index.js
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
