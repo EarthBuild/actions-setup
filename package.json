@@ -26,25 +26,25 @@
     "@actions/core": "3.0.1",
     "@actions/tool-cache": "4.0.0",
     "@octokit/core": "7.0.8",
-    "@octokit/plugin-paginate-rest": "15.0.0",
+    "@octokit/plugin-paginate-rest": "16.0.0",
     "semver": "7.8.5"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@octokit/types": "18.0.0",
-    "@types/node": "24.19.0",
+    "@types/node": "24.19.2",
     "@types/semver": "7.8.0",
     "@vercel/ncc": "0.45.0",
     "@vitest/coverage-v8": "5.0.3",
-    "eslint": "10.11.0",
+    "eslint": "10.12.0",
     "eslint-config-prettier": "10.1.8",
     "eslint-plugin-prettier": "5.5.6",
-    "prettier": "3.9.9",
+    "prettier": "3.9.10",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.71.0",
+    "typescript-eslint": "8.71.1",
     "vitest": "5.0.3"
   },
   "optionalDependencies": {
-    "@rollup/rollup-linux-x64-musl": "4.63.6"
+    "@rollup/rollup-linux-x64-musl": "4.64.4"
   }
 }
