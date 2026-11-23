@@ -42282,11 +42282,11 @@ const range = (a, b, str) => {
 //# sourceMappingURL=index.js.map
 ;// CONCATENATED MODULE: ./node_modules/brace-expansion/dist/esm/index.js
 
-const escSlash = '\0SLASH' + Math.random() + '\0';
-const escOpen = '\0OPEN' + Math.random() + '\0';
-const escClose = '\0CLOSE' + Math.random() + '\0';
-const escComma = '\0COMMA' + Math.random() + '\0';
-const escPeriod = '\0PERIOD' + Math.random() + '\0';
+const escSlash = '\0SLASH' + Math.random().toFixed(16) + '\0';
+const escOpen = '\0OPEN' + Math.random().toFixed(16) + '\0';
+const escClose = '\0CLOSE' + Math.random().toFixed(16) + '\0';
+const escComma = '\0COMMA' + Math.random().toFixed(16) + '\0';
+const escPeriod = '\0PERIOD' + Math.random().toFixed(16) + '\0';
 const escSlashPattern = new RegExp(escSlash, 'g');
 const escOpenPattern = new RegExp(escOpen, 'g');
 const escClosePattern = new RegExp(escClose, 'g');
@@ -42327,6 +42327,23 @@ const EXPANSION_MAX_DEPTH = 1_000;
 // seconds to produce two results. `EXPANSION_MAX_REWRITES` bounds how many
 // times the scan may restart. Real `{a},b}` input needs a handful.
 const EXPANSION_MAX_REWRITES = 1_000;
+// `EXPANSION_MAX_STEPS` bounds the work one `expand` call does, which `max`,
+// `maxLength` and `maxDepth` don't: nested sets are rescanned at every level
+// and chained groups each rebuild up to `max` results, so 2KB of input could
+// block the event loop for over 30 seconds. Each character scanned, result
+// built and sequence value generated is a step, and each `expand_` call costs
+// `CALL_STEPS` more. Past the budget, the set being expanded and everything
+// after it stay literal. A glob needs a few hundred steps, and nesting all the
+// way to `EXPANSION_MAX_DEPTH` about 4M.
+const EXPANSION_MAX_STEPS = 20_000_000;
+// What one `expand_` call costs on top of what it scans and builds. Setting
+// one up takes about as long as scanning 16 characters, and a set whose
+// results are wrapped to be expanded again makes one call per result, each
+// scanning and building next to nothing: 64KB of
+// `('{{' + ','.repeat(316) + '}{' + ','.repeat(316) + '}}').repeat(n)` made
+// 4M such calls, which spent the budget three times as slowly as anything
+// else.
+const CALL_STEPS = 16;
 function numeric(str) {
     return !isNaN(str) ? parseInt(str, 10) : str.charCodeAt(0);
 }
@@ -42352,12 +42369,96 @@ function pushAll(target, items) {
         target.push(items[i]);
     }
 }
+// `balanced`, run on `masked` (see `maskUnmatchedOpens`), sliced from `str`
+// and charged for the characters it walks: up to the group's `}`, or the
+// whole string when there is no match or unmatched `{` come first, which
+// `unmatched` then flags for masking. Once a call overdraws the budget, it
+// and every later one return undefined, so the rest stays literal.
+function balancedWithBudget(str, masked, budget) {
+    if (budget.remaining < 0) {
+        return undefined;
+    }
+    const r = range('{', '}', masked);
+    const unmatched = r !== undefined && masked.indexOf('{') < r[0];
+    budget.remaining -= r && !unmatched ? r[1] + 1 : str.length;
+    if (!r || budget.remaining < 0) {
+        return undefined;
+    }
+    return {
+        end: r[1],
+        pre: str.slice(0, r[0]),
+        body: str.slice(r[0] + 1, r[1]),
+        post: str.slice(r[1] + 1),
+        unmatched,
+    };
+}
+// `masked` with every `{` that has no matching `}` swapped for a `\0`, which
+// keeps the length, so a scan of it still lines up with the string it was
+// made from. Such a `{` is literal either way, but `balanced` only learns that
+// one is unmatched by reading to the end of the string, so with one at the
+// head of every group (`'{a,{b,c}'.repeat(n)`) each scan read the rest of the
+// input. That was quadratic, and once the step budget charged for it, it ran
+// out partway through and left the rest literal. A scan of the masked copy
+// stops at the group's `}`. It is one pass, charged as such.
+function maskUnmatchedOpens(masked, budget) {
+    budget.remaining -= masked.length;
+    const open = [];
+    for (let i = 0; i < masked.length; i++) {
+        const c = masked.charCodeAt(i);
+        if (c === 0x7b) {
+            open.push(i);
+        }
+        else if (c === 0x7d && open.length) {
+            open.pop();
+        }
+    }
+    let out = '';
+    let last = 0;
+    for (let i = 0; i < open.length; i++) {
+        const at = open[i];
+        out += masked.slice(last, at) + '\0';
+        last = at + 1;
+    }
+    return out + masked.slice(last);
+}
+// Whether `str` has a `,` not followed by another `,`, with a `}` after it on
+// the same line - what `/,(?!,).*\}/.test(str)` asks, answered in one pass from
+// the end. The regex tries every `,` and backtracks through the rest of its
+// line from each, which is quadratic, and the `{a},b}` rewrite asks again on
+// every pass. Like a scan, it is charged for the whole string and refused if
+// that overdraws the budget.
+function commaSetFollows(str, budget) {
+    budget.remaining -= str.length;
+    if (budget.remaining < 0) {
+        return false;
+    }
+    // Whether a `}` follows the current position before the line ends
+    let close = false;
+    for (let i = str.length - 1; i >= 0; i--) {
+        const c = str.charCodeAt(i);
+        if (c === 0x7d) {
+            close = true;
+        }
+        else if (c === 0x0a || c === 0x0d || c === 0x2028 || c === 0x2029) {
+            // A line terminator, which `.` does not match
+            close = false;
+        }
+        else if (c === 0x2c && close && str.charCodeAt(i + 1) !== 0x2c) {
+            return true;
+        }
+    }
+    return false;
+}
 /**
  * Basically just str.split(","), but handling cases
  * where we have nested braced sections, which should be
  * treated as individual members, like {a,{b,c},d}
+ *
+ * Returns `undefined` if the step budget runs out before the whole set is
+ * split, since splitting what is left on every comma would tear apart the
+ * nested sets it still holds.
  */
-function parseCommaParts(str) {
+function parseCommaParts(str, budget) {
     const parts = [];
     // Walk the brace groups iteratively. Recursing on `post` once per group let a
     // chain of them exhaust the stack - the parsing-side counterpart to
@@ -42367,7 +42468,11 @@ function parseCommaParts(str) {
     // The part the next chunk continues
     let carry = '';
     for (;;) {
-        const m = balanced('{', '}', str);
+        // A set's body holds no unmatched `{`, so there is nothing to mask.
+        const m = balancedWithBudget(str, str, budget);
+        if (budget.remaining < 0) {
+            return undefined;
+        }
         if (!m) {
             const tail = str.split(',');
             tail[0] = carry + tail[0];
@@ -42387,11 +42492,23 @@ function parseCommaParts(str) {
         str = post;
     }
 }
+// An option that is left out, or that is NaN, gets its default. Every
+// comparison against NaN is false, so a NaN bound would never be reached:
+// `{ maxSteps: NaN }` let 15KB of input block the event loop for 16 seconds,
+// and `{ maxDepth: NaN }` overflowed the stack again (CVE-2026-102278). Pass
+// `Infinity` to lift a bound.
+function bound(value, fallback) {
+    return value === undefined || isNaN(value) ? fallback : value;
+}
 function expand(str, options = {}) {
     if (!str) {
         return [];
     }
-    const { max = EXPANSION_MAX, maxLength = EXPANSION_MAX_LENGTH, maxDepth = EXPANSION_MAX_DEPTH, maxRewrites = EXPANSION_MAX_REWRITES, } = options;
+    const max = bound(options.max, EXPANSION_MAX);
+    const maxLength = bound(options.maxLength, EXPANSION_MAX_LENGTH);
+    const maxDepth = bound(options.maxDepth, EXPANSION_MAX_DEPTH);
+    const maxRewrites = bound(options.maxRewrites, EXPANSION_MAX_REWRITES);
+    const maxSteps = bound(options.maxSteps, EXPANSION_MAX_STEPS);
     // I don't know why Bash 4.3 does this, but it does.
     // Anything starting with {} will have the first two bytes preserved
     // but *only* at the top level, so {},a}b will not expand to anything,
@@ -42401,7 +42518,7 @@ function expand(str, options = {}) {
     if (str.slice(0, 2) === '{}') {
         str = '\\{\\}' + str.slice(2);
     }
-    return expand_(escapeBraces(str), max, maxLength, maxDepth, 0, maxRewrites, true).map(unescapeBraces);
+    return expand_(escapeBraces(str), max, maxLength, maxDepth, 0, maxRewrites, { remaining: maxSteps }, true).map(unescapeBraces);
 }
 function embrace(str) {
     return '{' + str + '}';
@@ -42419,30 +42536,41 @@ function gte(i, y) {
 // number of results at `max` and the total number of characters at `maxLength`.
 // This is the one place output grows, so bounding it here keeps the single
 // accumulator - and therefore memory - flat regardless of how many brace groups
-// are combined (CVE-2026-14257).
-function combine(acc, pre, values, max, maxLength, dropEmpties) {
+// are combined (CVE-2026-14257). Each result built is a step, since `max` and
+// `maxLength` bound one combination, not how many brace groups are combined.
+function combine(acc, pre, values, max, maxLength, dropEmpties, budget) {
     const out = [];
     let length = 0;
-    for (let a = 0; a < acc.length; a++) {
-        for (let v = 0; v < values.length; v++) {
+    // Bash drops empty results at the top level, and they don't count against
+    // `max`, so `max` bounds the number of *kept* results. Only an empty
+    // `acc[a] + pre` can make one, so for those the empty values are skipped
+    // without being visited. Visiting them one at a time let a set of empties
+    // cost `acc.length * values.length` while keeping nothing.
+    let nonEmpty;
+    outer: for (let a = 0; a < acc.length; a++) {
+        const prefix = acc[a] + pre;
+        let vs = values;
+        if (dropEmpties && !prefix) {
+            if (!nonEmpty)
+                nonEmpty = values.filter(v => v);
+            vs = nonEmpty;
+        }
+        for (let v = 0; v < vs.length; v++) {
             if (out.length >= max)
-                return out;
-            const expansion = acc[a] + pre + values[v];
-            // Bash drops empty results at the top level. Skip them before they count
-            // against `max`, so `max` bounds the number of *kept* results.
-            if (dropEmpties && !expansion)
-                continue;
+                break outer;
+            const expansion = prefix + vs[v];
             if (length + expansion.length > maxLength)
-                return out;
+                break outer;
             out.push(expansion);
             length += expansion.length;
         }
     }
+    budget.remaining -= out.length;
     return out;
 }
 // The expansion values of a single numeric (`1..5`) or alphabetic (`a..e..2`)
-// sequence body.
-function expandSequence(body, isAlphaSequence, max, maxLength) {
+// sequence body, or `undefined` if the step budget runs out generating them.
+function expandSequence(body, isAlphaSequence, max, maxLength, budget) {
     const n = body.split(/\.\./);
     const N = [];
     // A sequence body always splits into two or three parts, but the compiler
@@ -42465,8 +42593,20 @@ function expandSequence(body, isAlphaSequence, max, maxLength) {
         test = gte;
     }
     const pad = n.some(isPadded);
+    // A padded value is built a character at a time to `width`, which the input
+    // sets, so it costs one step per character: 64KB of
+    // `('{' + '0'.repeat(100) + '..99999}').repeat(n)` took 7 seconds charged
+    // one step per value.
+    const cost = pad ? width : 1;
     let length = 0;
     for (let i = x; test(i, y) && N.length < max; i += incr) {
+        // Each value is a step. `max` and `maxLength` bound one sequence, but a
+        // chain of them still generated up to `max` values each, however few
+        // combining could keep.
+        budget.remaining -= cost;
+        if (budget.remaining < 0) {
+            return undefined;
+        }
         let c;
         if (isAlphaSequence) {
             c = String.fromCharCode(i);
@@ -42496,7 +42636,9 @@ function expandSequence(body, isAlphaSequence, max, maxLength) {
     }
     return N;
 }
-function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
+function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, budget, isTop) {
+    // An overdraft here makes the first scan refuse, so `str` stays literal.
+    budget.remaining -= CALL_STEPS;
     // Too deeply nested to keep following: treat the rest as literal, the same
     // way a group that cannot expand is already handled. Truncating rather than
     // throwing keeps `expand` total, matching `max` and `maxLength`.
@@ -42519,20 +42661,33 @@ function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
     let rewrites = 0;
     let dropEmpties = false;
     let firstGroup = true;
+    // `str` with its unmatched `{` masked, once a scan has run into them
+    let masked = str;
     for (;;) {
-        const m = balanced('{', '}', str);
-        // No brace set left: the rest of the string is literal.
+        const m = balancedWithBudget(str, masked, budget);
+        // No brace set left, or no step budget left to look for one: the rest of
+        // the string is literal.
         if (!m) {
-            return combine(acc, str, [''], max, maxLength, dropEmpties);
+            return combine(acc, str, [''], max, maxLength, dropEmpties, budget);
+        }
+        if (m.unmatched) {
+            masked = maskUnmatchedOpens(masked, budget);
         }
         // no need to expand pre, since it is guaranteed to be free of brace-sets
         const pre = m.pre;
+        // This set and the rest of the string, literal: for a set that cannot
+        // expand, and for one the step budget runs out on. Once it is overdrawn,
+        // every set still being expanded, at every level, stays literal like this -
+        // otherwise each level above would go on combining, and wrapping and
+        // expanding again, results the budget was too small for.
+        const literal = () => combine(acc, pre + '{' + m.body + '}' + m.post, [''], max, maxLength, dropEmpties, budget);
         if (/\$$/.test(pre)) {
-            acc = combine(acc, pre + '{' + m.body + '}', [''], max, maxLength, dropEmpties && !m.post.length);
+            acc = combine(acc, pre + '{' + m.body + '}', [''], max, maxLength, dropEmpties && !m.post.length, budget);
             firstGroup = false;
             if (!m.post.length)
                 break;
             str = m.post;
+            masked = masked.slice(m.end + 1);
             continue;
         }
         const isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
@@ -42541,14 +42696,19 @@ function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
         const isOptions = m.body.indexOf(',') >= 0;
         if (!isSequence && !isOptions) {
             // {a},b}
-            if (rewrites < maxRewrites && m.post.match(/,(?!,).*\}/)) {
+            if (rewrites < maxRewrites && commaSetFollows(m.post, budget)) {
                 rewrites++;
                 str = m.pre + '{' + m.body + escClose + m.post;
+                // Taking a `}` away never gives an unmatched `{` a partner, so what
+                // is masked stays unmatched. The `{` it closed can be left without
+                // one, and the next scan masks it.
+                masked =
+                    masked.slice(0, m.end) + escClose + masked.slice(m.end + 1);
                 isTop = true;
                 continue;
             }
             // Nothing here expands, so the whole remaining string is literal.
-            return combine(acc, pre + '{' + m.body + '}' + m.post, [''], max, maxLength, dropEmpties);
+            return literal();
         }
         if (firstGroup) {
             dropEmpties = isTop && !isSequence;
@@ -42556,20 +42716,36 @@ function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
         }
         let values;
         if (isSequence) {
-            values = expandSequence(m.body, isAlphaSequence, max, maxLength);
+            values = expandSequence(m.body, isAlphaSequence, max, maxLength, budget);
+            if (!values) {
+                return literal();
+            }
         }
         else {
-            let n = parseCommaParts(m.body);
+            let n = parseCommaParts(m.body, budget);
+            // The step budget ran out partway through the set.
+            if (!n) {
+                return literal();
+            }
             if (n.length === 1 && n[0] !== undefined) {
                 // x{{a,b}}y ==> x{a}y x{b}y
-                n = expand_(n[0], max, maxLength, maxDepth, depth + 1, maxRewrites, false).map(embrace);
+                n = expand_(n[0], max, maxLength, maxDepth, depth + 1, maxRewrites, budget, false).map(embrace);
+                // The step budget ran out expanding the set's only part.
+                if (budget.remaining < 0) {
+                    return literal();
+                }
                 //XXX is this necessary? Can't seem to hit it in tests.
                 /* c8 ignore start */
                 if (n.length === 1) {
-                    acc = combine(acc, pre + n[0], [''], max, maxLength, dropEmpties && !m.post.length);
+                    const next = combine(acc, pre + n[0], [''], max, maxLength, dropEmpties && !m.post.length, budget);
+                    if (budget.remaining < 0) {
+                        return literal();
+                    }
+                    acc = next;
                     if (!m.post.length)
                         break;
                     str = m.post;
+                    masked = masked.slice(m.end + 1);
                     continue;
                 }
                 /* c8 ignore stop */
@@ -42588,7 +42764,11 @@ function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
             values = [];
             let valuesLength = 0;
             outer: for (let j = 0; j < n.length; j++) {
-                const expanded = expand_(n[j], max, maxLength, maxDepth, depth + 1, maxRewrites, false);
+                const expanded = expand_(n[j], max, maxLength, maxDepth, depth + 1, maxRewrites, budget, false);
+                // The step budget ran out expanding a member.
+                if (budget.remaining < 0) {
+                    return literal();
+                }
                 for (let k = 0; k < expanded.length; k++) {
                     const v = expanded[k];
                     if (dropsEmpties && !v)
@@ -42602,10 +42782,16 @@ function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
                 }
             }
         }
-        acc = combine(acc, pre, values, max, maxLength, dropEmpties && !m.post.length);
+        const next = combine(acc, pre, values, max, maxLength, dropEmpties && !m.post.length, budget);
+        // The step budget ran out combining the set's values in.
+        if (budget.remaining < 0) {
+            return literal();
+        }
+        acc = next;
         if (!m.post.length)
             break;
         str = m.post;
+        masked = masked.slice(m.end + 1);
     }
     return acc;
 }
@@ -56344,6 +56530,37 @@ function safeCdata(val) {
 function escapeAttribute(val) {
   return valToStr(val).replace(/"/g, '&quot;').replace(/'/g, '&apos;')
 }
+
+/**
+ * Resolve a tag or attribute name through sanitizeName if configured.
+ * Validation via xml-naming's qName is performed first; the sanitizeName
+ * callback is invoked only when the name is invalid. If sanitizeName is
+ * false (default), no validation occurs and the name is used as-is.
+ *
+ * @param {string}  name        - raw name from the JS object
+ * @param {boolean} isAttribute - true when resolving an attribute name
+ * @param {object}  options
+ * @param {Matcher} matcher     - current matcher state (readonly from callback perspective)
+ * @param {function} qNameValidator - function to validate tag names
+ */
+
+function resolveName(name, isAttribute, options, matcher, validator) {
+  if (!options.sanitizeName) return name;
+
+  // Processing-instruction names: validate the part after the leading "?"
+  const isPI = !isAttribute && name[0] === '?';
+  const bare = isPI ? name.slice(1) : name;
+
+  if (validator(bare)) return name;
+
+  const result = options.sanitizeName(bare, { isAttribute, matcher: matcher.readOnly() });
+
+  // Never trust the callback's output
+  if (typeof result !== 'string' || !validator(result)) {
+    throw new Error(`sanitizeName returned an invalid XML name for "${bare}"`);
+  }
+  return isPI ? '?' + result : result;
+}
 ;// CONCATENATED MODULE: ./node_modules/xml-naming/src/index.js
 /**
  * xml-naming
@@ -56757,24 +56974,6 @@ function detectXmlVersionFromArray(jArray, options) {
 }
 
 /**
- * Resolve a tag or attribute name through sanitizeName if configured.
- * Validation via xml-naming's qName is performed first; the sanitizeName
- * callback is invoked only when the name is invalid. If sanitizeName is
- * false (default), no validation occurs and the name is used as-is.
- *
- * @param {string}  name        - raw name from the JS object
- * @param {boolean} isAttribute - true when resolving an attribute name
- * @param {object}  options
- * @param {Matcher} matcher     - current matcher state (readonly from callback perspective)
- * @param {function} qNameValidator - function to validate tag names
- */
-function resolveTagName(name, isAttribute, options, matcher, qNameValidator) {
-    if (!options.sanitizeName) return name;
-    if (qNameValidator(name)) return name;
-    return options.sanitizeName(name, { isAttribute, matcher: matcher.readOnly() });
-}
-
-/**
  * @param {array} jArray
  * @param {any} options
  * @returns
@@ -56834,13 +57033,13 @@ function arrToStr(arr, options, indentation, matcher, stopNodeExpressions, qName
         // are not user-supplied XML element names.
         const isSpecialName = rawTagName === options.textNodeName
             || rawTagName === options.cdataPropName
-            || rawTagName === options.commentPropName
-            || rawTagName[0] === '?';
+            || rawTagName === options.commentPropName;
+        //|| rawTagName[0] === '?';
 
         // Resolve tag name (may transform it; may throw for invalid names)
         const tagName = isSpecialName
             ? rawTagName
-            : resolveTagName(rawTagName, false, options, matcher, qNameValidator);
+            : resolveName(rawTagName, false, options, matcher, qNameValidator);
 
         // Extract attributes from ":@" property
         const attrValues = extractAttributeValues(tagObj[":@"], options);
@@ -56905,7 +57104,7 @@ function arrToStr(arr, options, indentation, matcher, stopNodeExpressions, qName
         // If this is a stopNode, get raw content without processing
         let tagValue;
         if (isStopNode) {
-            tagValue = orderedJs2Xml_getRawContent(tagObj[rawTagName], options);
+            tagValue = orderedJs2Xml_getRawContent(tagObj[rawTagName], options, matcher.getDepth());
         } else {
             tagValue = arrToStr(tagObj[rawTagName], options, newIdentation, matcher, stopNodeExpressions, qNameValidator);
         }
@@ -56962,7 +57161,10 @@ function extractAttributeValues(attrMap, options) {
  * Extract raw content from a stopNode without any processing
  * This preserves the content exactly as-is, including special characters
  */
-function orderedJs2Xml_getRawContent(arr, options) {
+function orderedJs2Xml_getRawContent(arr, options, depth = 0) {
+    if (options.maxNestedTags && depth > options.maxNestedTags) {
+        throw new Error("Maximum nested tags exceeded");
+    }
     if (!Array.isArray(arr)) {
         // Non-array values return as-is
         if (arr !== undefined && arr !== null) {
@@ -56991,7 +57193,7 @@ function orderedJs2Xml_getRawContent(arr, options) {
         } else if (tagName) {
             // Nested tags within stopNode — no sanitizeName, content is raw
             const attStr = attr_to_str_raw(item[":@"], options);
-            const nestedContent = orderedJs2Xml_getRawContent(item[tagName], options);
+            const nestedContent = orderedJs2Xml_getRawContent(item[tagName], options, depth + 1);
 
             if (!nestedContent || nestedContent.length === 0) {
                 content += `<${tagName}${attStr}/>`;
@@ -57046,7 +57248,7 @@ function attr_to_str(attrMap, options, isStopNode, matcher, qNameValidator) {
             const cleanAttrName = attr.substr(options.attributeNamePrefix.length);
             const resolvedAttrName = isStopNode
                 ? cleanAttrName  // stopNodes are raw — skip sanitizeName for attr names too
-                : resolveTagName(cleanAttrName, true, options, matcher, qNameValidator);
+                : resolveName(cleanAttrName, true, options, matcher, qNameValidator);
 
             let attrVal;
             if (isStopNode) {
@@ -57230,24 +57432,6 @@ function detectXmlVersionFromObj(jObj, options) {
   return '1.0';
 }
 
-/**
- * Resolve a tag or attribute name through sanitizeName if configured.
- * Validation via xml-naming's qName is performed first; the sanitizeName
- * callback is invoked only when the name is invalid. If sanitizeName is
- * false (default), no validation occurs and the name is used as-is.
- *
- * @param {string}  name        - raw name from the JS object
- * @param {boolean} isAttribute - true when resolving an attribute name
- * @param {object}  options
- * @param {Matcher} matcher     - current matcher state (readonly from callback perspective)
- * @param {function} qNameValidator - function to validate tag names
- */
-function fxb_resolveTagName(name, isAttribute, options, matcher, qNameValidator) {
-  if (!options.sanitizeName) return name;
-  if (qNameValidator(name)) return name;
-  return options.sanitizeName(name, { isAttribute, matcher: matcher.readOnly() });
-}
-
 Builder.prototype.build = function (jObj) {
   if (this.options.preserveOrder) {
     return toXml(jObj, this.options);
@@ -57288,12 +57472,12 @@ Builder.prototype.j2x = function (jObj, level, matcher, qNameValidator) {
       || key === this.options.cdataPropName
       || key === this.options.commentPropName
       || (this.options.attributesGroupName && key === this.options.attributesGroupName)
-      || this.isAttribute(key)
-      || key[0] === '?';
+      || this.isAttribute(key);
+    //|| key[0] === '?';
 
     const resolvedKey = isSpecialKey
       ? key
-      : fxb_resolveTagName(key, false, this.options, matcher, qNameValidator);
+      : resolveName(key, false, this.options, matcher, qNameValidator);
 
     if (typeof jObj[key] === 'undefined') {
       // supress undefined node only if it is not an attribute
@@ -57318,7 +57502,7 @@ Builder.prototype.j2x = function (jObj, level, matcher, qNameValidator) {
       const attr = this.isAttribute(key);
       if (attr && !this.ignoreAttributesFn(attr, jPath)) {
         // Resolve the attribute name through sanitizeName
-        const resolvedAttr = fxb_resolveTagName(attr, true, this.options, matcher, qNameValidator);
+        const resolvedAttr = resolveName(attr, true, this.options, matcher, qNameValidator);
         attrStr += this.buildAttrPairStr(resolvedAttr, valToStr(jObj[key]), isCurrentStopNode);
       } else if (!attr) {
         //tag value
@@ -57408,7 +57592,7 @@ Builder.prototype.j2x = function (jObj, level, matcher, qNameValidator) {
         const L = Ks.length;
         for (let j = 0; j < L; j++) {
           // Resolve attribute names inside attributesGroupName
-          const resolvedAttr = fxb_resolveTagName(Ks[j], true, this.options, matcher, qNameValidator);
+          const resolvedAttr = resolveName(Ks[j], true, this.options, matcher, qNameValidator);
           attrStr += this.buildAttrPairStr(resolvedAttr, valToStr(jObj[key][Ks[j]]), isCurrentStopNode);
         }
       } else {
@@ -57441,7 +57625,7 @@ function processTextOrObjNode(object, key, level, matcher, qNameValidator) {
 
   if (isStopNode) {
     // For stopNodes, build raw content without entity encoding
-    const rawContent = this.buildRawContent(object);
+    const rawContent = this.buildRawContent(object, matcher.getDepth());
     const attrStr = this.buildAttributesForStopNode(object);
     matcher.pop();
     return this.buildObjectNode(rawContent, key, attrStr, level);
@@ -57497,7 +57681,10 @@ Builder.prototype.extractAttributes = function (obj) {
 };
 
 // Build raw content for stopNode without entity encoding
-Builder.prototype.buildRawContent = function (obj) {
+Builder.prototype.buildRawContent = function (obj, depth = 0) {
+  if (this.options.maxNestedTags && depth >= this.options.maxNestedTags) {
+    throw new Error("Maximum nested tags exceeded");
+  }
   if (typeof obj === 'string') {
     return obj; // Already a string, return as-is
   }
@@ -57531,7 +57718,7 @@ Builder.prototype.buildRawContent = function (obj) {
         if (typeof item === 'string' || typeof item === 'number') {
           content += `<${key}>${item}</${key}>`;
         } else if (typeof item === 'object' && item !== null) {
-          const nestedContent = this.buildRawContent(item);
+          const nestedContent = this.buildRawContent(item, depth + 1);
           const nestedAttrs = this.buildAttributesForStopNode(item);
           if (nestedContent === '') {
             content += `<${key}${nestedAttrs}/>`;
@@ -57542,7 +57729,7 @@ Builder.prototype.buildRawContent = function (obj) {
       }
     } else if (typeof value === 'object' && value !== null) {
       // Nested object
-      const nestedContent = this.buildRawContent(value);
+      const nestedContent = this.buildRawContent(value, depth + 1);
       const nestedAttrs = this.buildAttributesForStopNode(value);
       if (nestedContent === '') {
         content += `<${key}${nestedAttrs}/>`;
@@ -58110,9 +58297,9 @@ function readAttributeStr(xmlData, i) {
  * and moving to the next starting position — one full backtrack per
  * position, which is quadratic in the length of the run.
  *
- * A single forward-only scan can never backtrack, so it can't be made slow
- * this way no matter how much whitespace the input contains — it's always
- * proportional to the length of the string, once.
+ * The scan is forward-only: the cursor never moves backwards, so each
+ * character is visited a constant number of times and the cost is linear
+ * in the length of the string.
  *
  * Each returned token mirrors the shape the old regex match array had, so
  * the validation logic below (which reads token[1]..token[6]) didn't need
@@ -58144,8 +58331,7 @@ function scanAttributeTokens(attrStr) {
 
     if (attrStr[i] === '=') {
       // No name before this '=' — not a valid attribute start. Move past
-      // just this one character and try again from the next position.
-      i = tokenStart + 1;
+      i++;
       continue;
     }
 
@@ -62769,7 +62955,14 @@ function resolveNameSpace(tagname) {
 
 //TODO: change regex to capture NS
 //const attrsRegx = new RegExp("([\\w\\-\\.\\:]+)\\s*=\\s*(['\"])((.|\n)*?)\\2","gm");
-const attrsRegx = new RegExp('([^\\s=]+)\\s*(=\\s*([\'"])([\\s\\S]*?)\\3)?', 'gm');
+// The value is matched with a negated class per quote type rather than a lazy `[\s\S]*?` up to a
+// backreference, which is much slower on long values (SVG paths, data URIs)
+const attrsRegx = /([^\s=]+)\s*(=\s*(?:"([^"]*)"|'([^']*)'))?/gm;
+
+// value inside double quotes, or inside single quotes, or undefined when there is no value
+function attrValue(match) {
+  return match[3] !== undefined ? match[3] : match[4];
+}
 
 function buildAttributesMap(attrStr, jPath, tagName, force = false) {
   const options = this.options;
@@ -62789,7 +62982,7 @@ function buildAttributesMap(attrStr, jPath, tagName, force = false) {
 
     for (let i = 0; i < len; i++) {
       const attrName = this.resolveNameSpace(matches[i][1]);
-      const oldVal = matches[i][4];
+      const oldVal = attrValue(matches[i]);
 
       if (attrName.length && oldVal !== undefined) {
         let val = oldVal;
@@ -62825,7 +63018,7 @@ function buildAttributesMap(attrStr, jPath, tagName, force = false) {
         }
         aName = sanitizeName(aName, options);
 
-        if (matches[i][4] !== undefined) {
+        if (attrValue(matches[i]) !== undefined) {
           // Reuse already-processed value — no double entity replacement
           const oldVal = processedVals[i];
 
@@ -63280,7 +63473,6 @@ function isItStopNode() {
 function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
   //TODO: ignore boolean attributes in tag expression
   //TODO: if ignore attributes, dont read full attribute expression but the end. But read for xml declaration
-  let attrBoundary = 0;
   const len = xmlData.length;
   const closeCode0 = closingChar.charCodeAt(0);
   const closeCode1 = closingChar.length > 1 ? closingChar.charCodeAt(1) : -1;
@@ -63291,10 +63483,10 @@ function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
   for (let index = i; index < len; index++) {
     const code = xmlData.charCodeAt(index);
 
-    if (attrBoundary) {
-      if (code === attrBoundary) attrBoundary = 0;
-    } else if (code === 34 || code === 39) { // " or '
-      attrBoundary = code;
+    if (code === 34 || code === 39) { // " or '
+      // Skip the quoted value in one step: nothing inside it can close the tag
+      index = xmlData.indexOf(xmlData[index], index + 1);
+      if (index === -1) return;
     } else if (code === closeCode0) {
       if (closeCode1 !== -1) {
         if (xmlData.charCodeAt(index + 1) === closeCode1) {
@@ -63305,7 +63497,7 @@ function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
         result += xmlData.substring(segmentStart, index);
         return { data: result, index };
       }
-    } else if (code === 9 && !attrBoundary) { // \t - only replace with space outside attribute values
+    } else if (code === 9) { // \t - only replace with space outside attribute values
       // Flush accumulated segment, add space, start new segment
       result += xmlData.substring(segmentStart, index) + ' ';
       segmentStart = index + 1;
