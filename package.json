@@ -35,16 +35,16 @@
     "@types/node": "26.6.6",
     "@types/semver": "7.8.0",
     "@vercel/ncc": "0.45.0",
-    "@vitest/coverage-v8": "5.1.0",
+    "@vitest/coverage-v8": "5.1.1",
     "eslint": "10.15.0",
     "eslint-config-prettier": "10.1.8",
     "eslint-plugin-prettier": "5.5.7",
     "prettier": "3.10.1",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.72.2",
-    "vitest": "5.1.0"
+    "typescript-eslint": "8.73.0",
+    "vitest": "5.1.1"
   },
   "optionalDependencies": {
-    "@rollup/rollup-linux-x64-musl": "4.68.2"
+    "@rollup/rollup-linux-x64-musl": "4.68.7"
   }
 }
